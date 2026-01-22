@@ -518,13 +518,19 @@ def main():
     # Setup device
     if torch.cuda.is_available():
         device = torch.device("cuda")
-        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        print(f"\nUsing CUDA backend: {torch.cuda.get_device_name(0)}")
+        print(f"  CUDA version: {torch.version.cuda}")
+        print(f"  Device count: {torch.cuda.device_count()}")
+        print(f"  Current device: {torch.cuda.current_device()}")
+        print(f"  Memory allocated: {torch.cuda.memory_allocated(0) / 1024**2:.2f} MB")
+        print(f"  Memory reserved: {torch.cuda.memory_reserved(0) / 1024**2:.2f} MB")
+        print(f"  Memory capacity: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB\n")
     elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
         device = torch.device("mps")
-        print("Using Apple MPS")
+        print("\nUsing Apple MPS backend\n")
     else:
         device = torch.device("cpu")
-        print("Using CPU")
+        print("\nUsing CPU backend\n")
 
     # Run experiments
     if args.benchmark_only:

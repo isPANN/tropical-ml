@@ -58,7 +58,21 @@ from tropical_pruning.finetuning import (
 
 
 # Default configuration
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if torch.cuda.is_available():
+    DEVICE = torch.device("cuda")
+    print(f"Using CUDA backend: {torch.cuda.get_device_name(0)}")
+    print(f"  CUDA version: {torch.version.cuda}")
+    print(f"  Device count: {torch.cuda.device_count()}")
+    print(f"  Current device: {torch.cuda.current_device()}")
+    print(f"  Memory allocated: {torch.cuda.memory_allocated(0) / 1024**2:.2f} MB")
+    print(f"  Memory reserved: {torch.cuda.memory_reserved(0) / 1024**2:.2f} MB")
+elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    DEVICE = torch.device("mps")
+    print("Using Apple MPS backend")
+else:
+    DEVICE = torch.device("cpu")
+    print("Using CPU backend")
+
 DATA_DIR = Path("./data")
 RESULTS_DIR = Path("./results/cifar10")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
