@@ -1,15 +1,23 @@
 """
-Convolutional Winner Counter: Tracks which channels "win" in tropical max-plus
-operations for Conv2d layers.
+Convolutional Winner Counter: Tracks which output filters "win" in tropical
+max-plus convolution using the Im2Col + TropicalGEMM approach.
 
-In standard convolution: Y[b, c_out, h, w] = sum_k(conv(X[b, k, :, :], W[c_out, k, :, :]))
-In tropical convolution: Y[b, c_out, h, w] = max_k(tropical_conv(X[b, k, :, :], W[c_out, k, :, :]))
+Key insight from tropical geometry:
+- Standard convolution has "cancellation effects" (positive and negative terms can cancel)
+- Tropical convolution (max-plus) reveals the "geometric peak" contribution of each filter
+- A filter that rarely achieves the tropical max is geometrically redundant
 
-We use im2col (F.unfold) to convert convolution to matrix form, then apply tropical GEMM.
-The argmax indices reveal which input channels actually contribute to each output position.
-Channels with low "winner count" are geometrically useless and can be pruned.
+The approach:
+1. Im2Col: Unfold input X (B, C_in, H, W) -> patches (B*H_out*W_out, C_in*k*k)
+2. Reshape weights W (C_out, C_in, k, k) -> W_flat (C_out, C_in*k*k)
+3. TropicalGEMM: C_trop[i,j] = max_k(patches[i,k] + W_flat[j,k])
+   - i indexes spatial positions (pixels)
+   - j indexes output filters
+4. Winner counting: For each spatial position, which filter has the max tropical response?
 
-Uses tropical-gemm library for high-performance Rust/SIMD implementation.
+This differs from standard activation-based pruning because tropical max-plus
+isolates the geometric contribution of each filter without interference from
+cancellation effects.
 """
 
 from dataclasses import dataclass
@@ -20,29 +28,32 @@ import torch.nn.functional as F
 from tqdm import tqdm
 import tropical_gemm as tg
 
-from tropical_pruning.counter import WinnerStatistics, _LayerCounter
+from tropical_pruning.counter import WinnerStatistics
 
 
 @dataclass
 class ConvWinnerStatistics:
     """
-    Statistics collected from tropical forward passes for a Conv2d layer.
+    Statistics collected from tropical convolution for a Conv2d layer.
 
-    For Conv2d, we track which INPUT CHANNELS win. The argmax in tropical GEMM
-    operates over the flattened kernel dimension (C_in * kH * kW), and we map
-    back to input channel indices by: channel_idx = argmax_idx // (kH * kW).
+    For Conv2d, we compute the tropical feature map using Im2Col + TropicalGEMM,
+    then track which OUTPUT FILTERS win at each spatial position.
+
+    The tropical response C_trop[i,j] = max_k(patch[i,k] + weight[j,k]) tells us
+    the "geometric peak" contribution of filter j at spatial position i.
+    Filters that rarely win are geometrically redundant.
     """
     layer_name: str
-    # Shape: (in_channels,) - how many times each input channel achieved argmax
+    # Shape: (out_channels,) - how many times each output filter achieved tropical argmax
     winner_count: torch.Tensor
-    # Total number of output positions processed (B * C_out * H_out * W_out)
+    # Total number of spatial positions processed (B * H_out * W_out)
     total_positions: int
-    # Shape: (in_channels,) - sum of margins when winning
+    # Shape: (out_channels,) - sum of margins when winning
     margin_sum: Optional[torch.Tensor] = None
-    # Shape: (in_channels,) - count for margin averaging
+    # Shape: (out_channels,) - count for margin averaging
     margin_count: Optional[torch.Tensor] = None
-    # Kernel size for reference
-    kernel_size: Tuple[int, int] = (1, 1)
+    # Number of output channels for reference
+    out_channels: int = 0
 
     @property
     def winner_frequency(self) -> torch.Tensor:
@@ -64,7 +75,7 @@ class ConvWinnerStatistics:
             total_positions=self.total_positions,
             margin_sum=self.margin_sum.to(device) if self.margin_sum is not None else None,
             margin_count=self.margin_count.to(device) if self.margin_count is not None else None,
-            kernel_size=self.kernel_size,
+            out_channels=self.out_channels,
         )
 
     def to_winner_statistics(self) -> WinnerStatistics:
@@ -80,30 +91,26 @@ class ConvWinnerStatistics:
 
 class ConvWinnerCounter:
     """
-    Collects winner statistics from tropical forward passes for Conv2d layers.
+    Collects winner statistics using Im2Col + TropicalGEMM for Conv2d layers.
 
-    This class wraps a model and tracks argmax indices during tropical convolution
-    operations to identify which input channels contribute to the output.
+    This class computes the TROPICAL feature map (not standard convolution output)
+    and tracks which output filters produce the maximum tropical response at each
+    spatial position.
 
-    For Conv2d layers, we use F.unfold (im2col) to convert convolutions to matrix
-    multiplications, enabling the use of tropical GEMM:
+    Why tropical instead of standard convolution?
+    - Standard: Y = Σ(W * X) has cancellation effects
+    - Tropical: Y_trop = max(W + X) reveals geometric peak contributions
+    - Example: W=[10,-10], X=[5,5] -> Standard: 0, Tropical: 15
 
-    1. Unfold input: X (B, C_in, H, W) -> patches (B, C_in*kH*kW, L)
-       where L = H_out * W_out (number of output spatial positions)
-
-    2. Reshape weight: W (C_out, C_in, kH, kW) -> W_flat (C_out, C_in*kH*kW)
-
-    3. Tropical GEMM: argmax_k(patches_k + W_flat_k) for each output position
-
-    4. Map argmax back to input channel: channel = argmax // (kH * kW)
+    The Im2Col transformation converts convolution to matrix multiplication,
+    allowing us to use our SIMD-accelerated TropicalGEMM kernel.
 
     Example:
         >>> model = VGG16()
         >>> counter = ConvWinnerCounter(model)
-        >>> for batch, _ in calibration_loader:
-        ...     counter.forward(batch)
-        >>> stats = counter.get_statistics()
-        >>> print(stats['features.0'].winner_frequency)  # First conv layer
+        >>> stats = counter.collect(calibration_loader)
+        >>> # Check which filters rarely win in tropical sense
+        >>> print(stats['features.0'].winner_frequency)
     """
 
     def __init__(
@@ -164,27 +171,25 @@ class ConvWinnerCounter:
         for name, module in self.model.named_modules():
             if name in self.layer_names:
                 if isinstance(module, nn.Conv2d):
-                    # Initialize counter for this conv layer
+                    # Initialize counter for this conv layer - tracks OUTPUT filters
                     self._counters[name] = _ConvLayerCounter(
                         name=name,
-                        in_channels=module.in_channels,
-                        kernel_size=module.kernel_size,
+                        out_channels=module.out_channels,
                         track_margin=self.track_margin,
                         device=self.device,
                     )
 
-                    # Register hook
+                    # Register hook to compute tropical convolution
                     hook = module.register_forward_hook(
                         self._create_conv_hook(name, module)
                     )
                     self._hooks.append(hook)
 
                 elif isinstance(module, nn.Linear) and self.include_linear:
-                    # Initialize counter for linear layer (same as WinnerCounter)
+                    # Initialize counter for linear layer
                     self._counters[name] = _ConvLayerCounter(
                         name=name,
-                        in_channels=module.in_features,
-                        kernel_size=(1, 1),  # Treat as 1x1 "kernel"
+                        out_channels=module.out_features,
                         track_margin=self.track_margin,
                         device=self.device,
                         is_linear=True,
@@ -196,43 +201,38 @@ class ConvWinnerCounter:
                     self._hooks.append(hook)
 
     def _create_conv_hook(self, layer_name: str, module: nn.Conv2d):
-        """Create a forward hook for a Conv2d layer."""
+        """Create a forward hook for a Conv2d layer.
+
+        This hook computes the TROPICAL feature map using Im2Col + TropicalGEMM,
+        then performs pixel-wise winner counting on the tropical output.
+
+        Steps:
+        1. Unfold input X -> patches (B*L, K) where L=H_out*W_out, K=C_in*k*k
+        2. Reshape weights W -> W_flat (C_out, K)
+        3. TropicalGEMM: C_trop[i,j] = max_k(patches[i,k] + W_flat[j,k])
+        4. Argmax over filters: which filter wins at each spatial position
+        """
 
         def hook(module: nn.Conv2d, input: Tuple[torch.Tensor, ...], output: torch.Tensor):
             x = input[0]  # (B, C_in, H, W)
             weight = module.weight  # (C_out, C_in, kH, kW)
 
-            # Use tropical forward to get argmax indices
-            argmax_indices, margin = self._tropical_conv_forward(
-                x, weight, module.kernel_size, module.stride,
-                module.padding, module.dilation, module.groups
+            # Compute tropical feature map and get argmax
+            argmax_indices, margin = self._compute_tropical_conv(
+                x, weight,
+                kernel_size=module.kernel_size,
+                stride=module.stride,
+                padding=module.padding,
+                dilation=module.dilation,
+                groups=module.groups,
             )
 
-            # Map argmax indices (over C_in*kH*kW) back to input channels
-            kH, kW = module.kernel_size
-            channel_indices = argmax_indices // (kH * kW)
-
-            # Update counter with channel indices
-            self._counters[layer_name].update(channel_indices, margin)
-
-        return hook
-
-    def _create_linear_hook(self, layer_name: str, module: nn.Linear):
-        """Create a forward hook for a Linear layer (for hybrid models)."""
-
-        def hook(module: nn.Linear, input: Tuple[torch.Tensor, ...], output: torch.Tensor):
-            x = input[0]  # (B, ..., in_features)
-            weight = module.weight  # (out_features, in_features)
-
-            # Use tropical forward
-            argmax_indices, margin = self._tropical_linear_forward(x, weight)
-
-            # Update counter
+            # Update counter with output filter indices
             self._counters[layer_name].update(argmax_indices, margin)
 
         return hook
 
-    def _tropical_conv_forward(
+    def _compute_tropical_conv(
         self,
         x: torch.Tensor,
         weight: torch.Tensor,
@@ -243,14 +243,21 @@ class ConvWinnerCounter:
         groups: int,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-        Compute tropical max-plus convolution using im2col + tropical GEMM.
+        Compute tropical convolution using Im2Col + TropicalGEMM.
 
-        The convolution Y = conv(X, W) is converted to matrix multiplication:
-        - patches = unfold(X): (B, C_in*kH*kW, L) where L = H_out * W_out
-        - W_flat = W.view(C_out, C_in*kH*kW)
-        - For each batch, each spatial position l in L:
-          - tropical_out[c_out, l] = max_k(patches[k, l] + W_flat[c_out, k])
-          - argmax[c_out, l] = argmax_k(patches[k, l] + W_flat[c_out, k])
+        This computes the tropical feature map:
+            C_trop[b, l, c_out] = max_k(patches[b, l, k] + W_flat[c_out, k])
+
+        where:
+            - l indexes spatial positions (H_out * W_out)
+            - k indexes the flattened kernel dimension (C_in * kH * kW)
+            - c_out indexes output filters
+
+        Then we find which filter wins at each spatial position.
+
+        Returns:
+            argmax_indices: (B, L) - which filter won at each spatial position
+            margin: (B, L) - gap between 1st and 2nd place (optional)
         """
         B, C_in, H, W = x.shape
         C_out = weight.shape[0]
@@ -258,58 +265,69 @@ class ConvWinnerCounter:
 
         # Handle grouped convolutions
         if groups > 1:
-            # For grouped convs, process each group separately
-            # Each group has C_in/groups input channels and C_out/groups output channels
-            return self._tropical_grouped_conv_forward(
+            return self._compute_tropical_grouped_conv(
                 x, weight, kernel_size, stride, padding, dilation, groups
             )
 
-        # Unfold input to patches: (B, C_in*kH*kW, L)
+        # Step 1: Im2Col - Unfold input to patches
+        # patches shape: (B, C_in*kH*kW, L) where L = H_out * W_out
         patches = F.unfold(
             x, kernel_size, dilation=dilation, padding=padding, stride=stride
         )
-        _, K, L = patches.shape  # K = C_in * kH * kW
+        B, K, L = patches.shape  # K = C_in * kH * kW
 
-        # Reshape weight to (C_out, K)
+        # Step 2: Reshape weight to (C_out, K)
         weight_flat = weight.view(C_out, -1)
 
-        # Process each batch (tropical_gemm operates on 2D matrices)
+        # Step 3: TropicalGEMM for each batch
+        # We want: C_trop[l, c_out] = max_k(patches[l, k] + W_flat[c_out, k])
+        # This is: patches @ W_flat.T in tropical sense
+        # patches: (B, K, L) -> need to transpose to (B, L, K) for matmul
+        # W_flat: (C_out, K) -> W_flat.T is (K, C_out)
+        # Result: (B, L, C_out)
+
         all_argmax = []
         all_margin = [] if self.track_margin else None
 
         for b in range(B):
-            patch_b = patches[b]  # (K, L)
+            # patches[b]: (K, L) -> transpose to (L, K)
+            patch_b = patches[b].T  # (L, K)
 
-            # We want: for each output (c_out, l), find argmax_k(patch[k, l] + weight[c_out, k])
-            # This is: weight_flat @ patch_b in tropical sense, with transposed convention
-            # Actually: result[c_out, l] = max_k(weight_flat[c_out, k] + patch_b[k, l])
-
-            # tropical_gemm.maxplus_matmul_with_argmax expects A @ B
-            # A: (M, K), B: (K, N) -> C: (M, N)
-            # We have weight_flat: (C_out, K), patch_b: (K, L)
-            # So result will be (C_out, L)
-
-            weight_np = weight_flat.detach().cpu().numpy().astype('float32')
+            # TropicalGEMM: (L, K) @ (K, C_out) -> (L, C_out)
+            # Using tropical_gemm: A @ B where A is (L, K), B is (K, C_out)
+            # We need B = W_flat.T = (K, C_out)
             patch_np = patch_b.detach().cpu().numpy().astype('float32')
+            weight_t_np = weight_flat.T.detach().cpu().numpy().astype('float32')
 
-            result_flat, argmax_flat = tg.maxplus_matmul_with_argmax(weight_np, patch_np)
+            # tropical_gemm computes C[i,j] = max_k(A[i,k] + B[k,j])
+            result_np, argmax_np = tg.maxplus_matmul_with_argmax(patch_np, weight_t_np)
 
-            # Reshape to (C_out, L)
-            argmax_b = torch.from_numpy(argmax_flat).reshape(C_out, L).to(x.device)
-            all_argmax.append(argmax_b)
+            # result_np: (L, C_out) - tropical feature map values
+            # argmax_np: (L, C_out) - which k achieved max for each (l, c_out)
+
+            # Convert to tensors
+            result_b = torch.from_numpy(result_np).to(x.device)  # (L, C_out)
+
+            # Now find which OUTPUT FILTER wins at each spatial position
+            # argmax over c_out dimension
+            filter_argmax = result_b.argmax(dim=1)  # (L,) - which filter won at each position
+            all_argmax.append(filter_argmax)
 
             if self.track_margin:
-                # Compute margin for this batch
-                margin_b = self._compute_conv_margin(patch_b, weight_flat, argmax_b)
+                # Compute margin: gap between 1st and 2nd place filter
+                sorted_vals, _ = result_b.sort(dim=1, descending=True)
+                max_vals = sorted_vals[:, 0]  # (L,)
+                second_max = sorted_vals[:, 1] if C_out > 1 else max_vals
+                margin_b = max_vals - second_max  # (L,)
                 all_margin.append(margin_b)
 
-        # Stack batches: (B, C_out, L)
+        # Stack batches: (B, L)
         argmax_indices = torch.stack(all_argmax, dim=0)
         margin = torch.stack(all_margin, dim=0) if self.track_margin else None
 
         return argmax_indices, margin
 
-    def _tropical_grouped_conv_forward(
+    def _compute_tropical_grouped_conv(
         self,
         x: torch.Tensor,
         weight: torch.Tensor,
@@ -331,147 +349,84 @@ class ConvWinnerCounter:
         patches = F.unfold(
             x, kernel_size, dilation=dilation, padding=padding, stride=stride
         )  # (B, C_in*kH*kW, L)
-        _, _, L = patches.shape
+        B, _, L = patches.shape
 
         # Reshape to separate groups: (B, groups, c_in_per_group*kH*kW, L)
         patches = patches.view(B, groups, c_in_per_group * kH * kW, L)
 
-        # Process each group
-        all_argmax = []
-        all_margin = [] if self.track_margin else None
+        # For grouped convs, we compute tropical response per group
+        # then concatenate and find global winner
+        all_results = []
 
         for g in range(groups):
-            # Get group's patches and weights
-            patch_g = patches[:, g, :, :]  # (B, K_g, L) where K_g = c_in_per_group*kH*kW
-            weight_g = weight[g * c_out_per_group:(g + 1) * c_out_per_group]  # (c_out_per_group, c_in_per_group, kH, kW)
+            patch_g = patches[:, g, :, :]  # (B, K_g, L)
+            weight_g = weight[g * c_out_per_group:(g + 1) * c_out_per_group]
             weight_g_flat = weight_g.view(c_out_per_group, -1)  # (c_out_per_group, K_g)
 
-            # Process each batch
-            group_argmax = []
-            group_margin = [] if self.track_margin else None
-
+            group_results = []
             for b in range(B):
-                patch_bg = patch_g[b]  # (K_g, L)
-
-                weight_np = weight_g_flat.detach().cpu().numpy().astype('float32')
+                patch_bg = patch_g[b].T  # (L, K_g)
                 patch_np = patch_bg.detach().cpu().numpy().astype('float32')
+                weight_t_np = weight_g_flat.T.detach().cpu().numpy().astype('float32')
 
-                result_flat, argmax_flat = tg.maxplus_matmul_with_argmax(weight_np, patch_np)
+                result_np, _ = tg.maxplus_matmul_with_argmax(patch_np, weight_t_np)
+                result_bg = torch.from_numpy(result_np).to(x.device)  # (L, c_out_per_group)
+                group_results.append(result_bg)
 
-                argmax_bg = torch.from_numpy(argmax_flat).reshape(c_out_per_group, L).to(x.device)
+            group_results = torch.stack(group_results, dim=0)  # (B, L, c_out_per_group)
+            all_results.append(group_results)
 
-                # Map argmax back to global input channel indices
-                # Local argmax is in [0, K_g), convert to channel in [0, c_in_per_group)
-                local_channel = argmax_bg // (kH * kW)
-                # Add group offset to get global channel index
-                global_channel = local_channel + g * c_in_per_group
+        # Concatenate all groups: (B, L, C_out)
+        full_result = torch.cat(all_results, dim=2)
 
-                # We need to store indices that can be mapped back to channels
-                # Store the raw argmax offset by group
-                argmax_bg_global = argmax_bg + g * c_in_per_group * kH * kW
-
-                group_argmax.append(argmax_bg_global)
-
-                if self.track_margin:
-                    margin_bg = self._compute_conv_margin(patch_bg, weight_g_flat, argmax_bg)
-                    group_margin.append(margin_bg)
-
-            # (B, c_out_per_group, L)
-            group_argmax = torch.stack(group_argmax, dim=0)
-            all_argmax.append(group_argmax)
-
-            if self.track_margin:
-                group_margin = torch.stack(group_margin, dim=0)
-                all_margin.append(group_margin)
-
-        # Concatenate groups: (B, C_out, L)
-        argmax_indices = torch.cat(all_argmax, dim=1)
-        margin = torch.cat(all_margin, dim=1) if self.track_margin else None
-
-        return argmax_indices, margin
-
-    def _compute_conv_margin(
-        self,
-        patches: torch.Tensor,
-        weight_flat: torch.Tensor,
-        argmax_indices: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Compute the margin (gap to 2nd place) for convolution.
-
-        Args:
-            patches: (K, L) - unfolded input patches
-            weight_flat: (C_out, K) - flattened weights
-            argmax_indices: (C_out, L) - argmax indices
-        """
-        C_out, L = argmax_indices.shape
-        K = patches.shape[0]
-
-        # Compute all tropical sums: (C_out, K, L)
-        # tropical_sum[c, k, l] = weight_flat[c, k] + patches[k, l]
-        tropical_sum = weight_flat.unsqueeze(-1) + patches.unsqueeze(0)
-
-        # Get max values
-        max_values = tropical_sum.max(dim=1).values  # (C_out, L)
-
-        # Mask out the max and find second max
-        mask = torch.zeros_like(tropical_sum, dtype=torch.bool)
-        # Create indices for scatter
-        mask.scatter_(1, argmax_indices.unsqueeze(1), True)
-        masked = tropical_sum.masked_fill(mask, float('-inf'))
-        second_max = masked.max(dim=1).values  # (C_out, L)
-
-        margin = max_values - second_max
-        return margin
-
-    def _tropical_linear_forward(
-        self,
-        x: torch.Tensor,
-        weight: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Tropical forward for Linear layers (same as WinnerCounter)."""
-        # Flatten batch dimensions
-        original_shape = x.shape[:-1]
-        M = x[..., 0].numel()
-        K = x.shape[-1]
-        N = weight.shape[0]
-
-        x_flat = x.reshape(-1, K)
-        weight_t = weight.t().contiguous()
-
-        x_np = x_flat.detach().cpu().numpy().astype('float32')
-        w_np = weight_t.detach().cpu().numpy().astype('float32')
-
-        result_flat, argmax_flat = tg.maxplus_matmul_with_argmax(x_np, w_np)
-
-        argmax_indices = torch.from_numpy(argmax_flat).reshape(M, N)
-        argmax_indices = argmax_indices.reshape(*original_shape, N).to(x.device)
+        # Find winner across all output filters
+        filter_argmax = full_result.argmax(dim=2)  # (B, L)
 
         margin = None
         if self.track_margin:
-            margin = self._compute_linear_margin(x, weight, argmax_indices)
+            sorted_vals, _ = full_result.sort(dim=2, descending=True)
+            max_vals = sorted_vals[:, :, 0]
+            second_max = sorted_vals[:, :, 1] if C_out > 1 else max_vals
+            margin = max_vals - second_max  # (B, L)
 
-        return argmax_indices, margin
+        return filter_argmax, margin
 
-    def _compute_linear_margin(
-        self,
-        x: torch.Tensor,
-        weight: torch.Tensor,
-        argmax_indices: torch.Tensor,
-    ) -> torch.Tensor:
-        """Compute margin for Linear layers."""
-        x_expanded = x.unsqueeze(-2)
-        tropical_sum = x_expanded + weight
+    def _create_linear_hook(self, layer_name: str, module: nn.Linear):
+        """Create a forward hook for a Linear layer.
 
-        max_values = tropical_sum.max(dim=-1).values
+        For Linear layers, we use TropicalGEMM directly (no Im2Col needed).
+        """
 
-        mask = torch.zeros_like(tropical_sum, dtype=torch.bool)
-        mask.scatter_(-1, argmax_indices.unsqueeze(-1), True)
-        masked = tropical_sum.masked_fill(mask, float('-inf'))
-        second_max = masked.max(dim=-1).values
+        def hook(module: nn.Linear, input: Tuple[torch.Tensor, ...], output: torch.Tensor):
+            x = input[0]  # (B, ..., in_features)
+            weight = module.weight  # (out_features, in_features)
 
-        margin = max_values - second_max
-        return margin
+            # Flatten batch dimensions
+            original_shape = x.shape[:-1]
+            x_flat = x.reshape(-1, x.shape[-1])  # (N, in_features)
+
+            # TropicalGEMM: (N, in_features) @ (in_features, out_features) -> (N, out_features)
+            x_np = x_flat.detach().cpu().numpy().astype('float32')
+            weight_t_np = weight.T.detach().cpu().numpy().astype('float32')
+
+            result_np, _ = tg.maxplus_matmul_with_argmax(x_np, weight_t_np)
+            result = torch.from_numpy(result_np).to(x.device)  # (N, out_features)
+
+            # Find winner output neuron
+            argmax_indices = result.argmax(dim=1)  # (N,)
+
+            # Compute margin
+            margin = None
+            if self.track_margin:
+                sorted_vals, _ = result.sort(dim=1, descending=True)
+                max_vals = sorted_vals[:, 0]
+                second_max = sorted_vals[:, 1] if result.shape[1] > 1 else max_vals
+                margin = max_vals - second_max
+
+            # Update counter
+            self._counters[layer_name].update(argmax_indices, margin)
+
+        return hook
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -509,7 +464,7 @@ class ConvWinnerCounter:
         iterator = dataloader
         if show_progress:
             total = num_batches if num_batches else len(dataloader)
-            iterator = tqdm(dataloader, total=total, desc="Collecting conv statistics")
+            iterator = tqdm(dataloader, total=total, desc="Collecting tropical conv statistics")
 
         for i, batch in enumerate(iterator):
             if num_batches is not None and i >= num_batches:
@@ -565,31 +520,32 @@ class ConvWinnerCounter:
 
 
 class _ConvLayerCounter:
-    """Internal counter for a single Conv2d layer."""
+    """Internal counter for a single Conv2d layer.
+
+    Tracks pixel-wise winner counts for OUTPUT filters based on tropical feature map.
+    """
 
     def __init__(
         self,
         name: str,
-        in_channels: int,
-        kernel_size: Tuple[int, int],
+        out_channels: int,
         track_margin: bool = True,
         device: Optional[torch.device] = None,
         is_linear: bool = False,
     ):
         self.name = name
-        self.in_channels = in_channels
-        self.kernel_size = kernel_size
+        self.out_channels = out_channels
         self.track_margin = track_margin
         self.device = device or torch.device("cpu")
         self.is_linear = is_linear
 
-        # Track winner counts per INPUT channel
-        self.winner_count = torch.zeros(in_channels, dtype=torch.long, device=self.device)
+        # Track winner counts per OUTPUT filter
+        self.winner_count = torch.zeros(out_channels, dtype=torch.long, device=self.device)
         self.total_positions = 0
 
         if track_margin:
-            self.margin_sum = torch.zeros(in_channels, dtype=torch.float32, device=self.device)
-            self.margin_count = torch.zeros(in_channels, dtype=torch.long, device=self.device)
+            self.margin_sum = torch.zeros(out_channels, dtype=torch.float32, device=self.device)
+            self.margin_count = torch.zeros(out_channels, dtype=torch.long, device=self.device)
         else:
             self.margin_sum = None
             self.margin_count = None
@@ -602,19 +558,21 @@ class _ConvLayerCounter:
         """
         Update counters with new argmax indices.
 
-        For Conv2d: argmax_indices should already be mapped to channel indices.
-        Shape: (B, C_out, L) where values are in [0, in_channels).
+        For Conv2d: argmax_indices shape: (B, L), values in [0, out_channels)
+            where L = H_out * W_out (spatial positions)
+        For Linear: argmax_indices shape: (N,), values in [0, out_channels)
 
-        For Linear: argmax_indices shape: (..., out_features)
+        Each value indicates which output filter won the tropical competition
+        at that spatial position.
         """
         # Flatten indices
         flat_indices = argmax_indices.flatten().to(self.device)
         self.total_positions += flat_indices.numel()
 
         # Clamp indices to valid range (safety check)
-        flat_indices = flat_indices.clamp(0, self.in_channels - 1)
+        flat_indices = flat_indices.clamp(0, self.out_channels - 1)
 
-        # Count winners
+        # Count winners using scatter_add
         ones = torch.ones_like(flat_indices, dtype=torch.long)
         self.winner_count.scatter_add_(0, flat_indices, ones)
 
@@ -647,7 +605,7 @@ class _ConvLayerCounter:
                 total_positions=self.total_positions,
                 margin_sum=self.margin_sum.clone() if self.margin_sum is not None else None,
                 margin_count=self.margin_count.clone() if self.margin_count is not None else None,
-                kernel_size=self.kernel_size,
+                out_channels=self.out_channels,
             )
 
     def reset(self) -> None:

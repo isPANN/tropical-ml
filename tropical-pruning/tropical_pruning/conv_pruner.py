@@ -2,12 +2,19 @@
 Convolutional Tropical Pruner: Structured pruning for Conv2d layers.
 
 This module provides ConvTropicalPruner for filter-based structured pruning of
-convolutional neural networks. It uses winner statistics from tropical convolution
-to identify and remove entire filters (output channels) that rarely contribute.
+convolutional neural networks. It uses pixel-wise winner statistics to identify
+and remove entire filters (output channels) that rarely "win" at any spatial position.
 
-Key concept: Filter pruning removes entire output channels from Conv2d layers,
-which also removes corresponding input channels from the next layer. This
-maintains hardware efficiency as we get actual speedup (unlike unstructured pruning).
+Key insight from tropical geometry:
+- For each layer's output Y (B, C_out, H, W), we track which filters win at each pixel
+- A filter that never wins (low winner frequency) is geometrically redundant
+- This is a "self-pruning" approach: each layer's statistics determine its own pruning
+
+Pruning flow:
+1. Collect pixel-wise winner statistics for each Conv2d layer's output
+2. For each layer, identify filters with low winner frequency
+3. Prune those filters (output channels) from the current layer
+4. Propagate: prune corresponding input channels from the next layer
 
 Handles:
 - Conv2d filter pruning (remove output channels)
@@ -195,9 +202,8 @@ class ConvTropicalPruner:
         """
         Compute importance scores for filters (output channels) of a layer.
 
-        The importance is based on how often input channels of the NEXT layer win.
-        Since the next layer's inputs are this layer's outputs, stats from
-        layer[i+1] tell us the importance of layer[i]'s output channels.
+        Uses the layer's own pixel-wise winner statistics: filters that frequently
+        "win" at spatial positions are considered important.
 
         Args:
             layer_name: Name of the layer whose OUTPUT channels we're scoring.
@@ -205,18 +211,11 @@ class ConvTropicalPruner:
         Returns:
             Importance scores, shape (out_channels,).
         """
-        # Find the next layer whose stats we should use
-        next_conv = self._find_next_conv(layer_name)
+        if layer_name not in self.statistics:
+            raise ValueError(f"No statistics found for {layer_name}")
 
-        if next_conv and next_conv in self.statistics:
-            stats = self.statistics[next_conv]
-            return self.criterion.compute_importance(stats)
-        elif layer_name in self.statistics:
-            # Fallback: use the layer's own stats
-            stats = self.statistics[layer_name]
-            return self.criterion.compute_importance(stats)
-        else:
-            raise ValueError(f"No statistics found for {layer_name} or its successor")
+        stats = self.statistics[layer_name]
+        return self.criterion.compute_importance(stats)
 
     def get_pruning_mask(
         self,
@@ -226,6 +225,8 @@ class ConvTropicalPruner:
         """
         Get pruning mask for a Conv2d layer's output channels.
 
+        Uses the layer's own statistics to determine which filters to keep.
+
         Args:
             layer_name: Name of the layer.
             sparsity: Target sparsity (fraction to prune).
@@ -233,37 +234,38 @@ class ConvTropicalPruner:
         Returns:
             Boolean mask, True = keep filter, False = prune filter.
         """
-        next_conv = self._find_next_conv(layer_name)
-
-        if next_conv and next_conv in self.statistics:
-            stats = self.statistics[next_conv]
-        elif layer_name in self.statistics:
-            stats = self.statistics[layer_name]
-        else:
+        if layer_name not in self.statistics:
             raise ValueError(f"No statistics for {layer_name}")
 
+        stats = self.statistics[layer_name]
         return self.criterion.get_pruning_mask(stats, sparsity)
 
     def prune(
         self,
         sparsity: Union[float, Dict[str, float]],
         inplace: bool = False,
+        prune_first_conv: bool = False,
         prune_last_conv: bool = False,
     ) -> nn.Module:
         """
         Apply filter-based structured pruning to the model.
 
-        For each pair of consecutive Conv2d layers [C_i, C_i+1]:
-        - Stats from C_i+1 indicate importance of C_i's output channels
-        - We prune output channels (filters) of C_i
-        - We prune corresponding input channels of C_i+1
-        - We prune BatchNorm between them if present
+        Uses self-statistics: each layer's own pixel-wise winner statistics determine
+        which of its filters to prune. This is the correct tropical geometry approach.
+
+        Pruning flow for each layer:
+        1. Use layer's own statistics to identify low-importance filters
+        2. Prune those output channels (filters) from the current layer
+        3. Prune corresponding BatchNorm parameters if present
+        4. Prune corresponding input channels from the next layer
 
         Args:
             sparsity: Target sparsity. Can be:
                      - float: Same sparsity for all prunable layers
                      - dict: Per-layer sparsity mapping
             inplace: If True, modify model in place. Otherwise, return a copy.
+            prune_first_conv: If True, also prune the first conv layer.
+                            Usually False to preserve input channel compatibility.
             prune_last_conv: If True, also prune the last conv layer's outputs.
                            Usually False to preserve classifier compatibility.
 
@@ -278,7 +280,7 @@ class ConvTropicalPruner:
         # Get conv layers in order
         conv_layers = self._get_conv_layers_ordered()
 
-        if len(conv_layers) < 2:
+        if len(conv_layers) < 1:
             return pruned_model
 
         # Convert uniform sparsity to per-layer dict
@@ -289,51 +291,42 @@ class ConvTropicalPruner:
 
         self._pruning_masks = {}
 
-        # Determine which layers to prune (not first, optionally not last)
-        layers_to_prune = conv_layers[:-1] if not prune_last_conv else conv_layers
-        # Skip the first layer (don't prune input channels from raw images)
-        layers_to_prune = layers_to_prune[1:] if len(layers_to_prune) > 1 else []
+        # Determine which layers to prune
+        # Skip first layer unless explicitly requested (preserves input channels)
+        # Skip last layer unless explicitly requested (preserves classifier compatibility)
+        start_idx = 0 if prune_first_conv else 1
+        end_idx = len(conv_layers) if prune_last_conv else len(conv_layers) - 1
 
-        # Actually, we prune based on pairs: stats from layer[i] -> prune layer[i-1] outputs
-        # For conv, we iterate and for each conv (except first), we look at its stats
-        # to decide which filters to prune from the PREVIOUS conv
+        # Process each layer independently using its own statistics
+        for i in range(start_idx, end_idx):
+            layer_name = conv_layers[i]
 
-        for i in range(1, len(conv_layers)):
-            curr_conv_name = conv_layers[i]
-            prev_conv_name = conv_layers[i - 1]
-
-            # Skip if this is the last conv and we're not pruning it
-            if i == len(conv_layers) - 1 and not prune_last_conv:
-                # But still adjust prev_conv's output if it was pruned
-                if prev_conv_name in self._pruning_masks:
-                    mask = self._pruning_masks[prev_conv_name]
-                    self._prune_conv_input(pruned_model, curr_conv_name, mask)
-                continue
-
-            # Get sparsity for this pruning decision
-            layer_sparsity = sparsity_dict.get(curr_conv_name, 0.0)
+            # Get sparsity for this layer
+            layer_sparsity = sparsity_dict.get(layer_name, 0.0)
             if layer_sparsity == 0.0:
                 continue
 
-            # Skip if we don't have stats for current layer
-            if curr_conv_name not in self.statistics:
+            # Skip if we don't have stats for this layer
+            if layer_name not in self.statistics:
                 continue
 
-            # Compute mask: stats from curr tell us importance of prev's outputs
-            stats = self.statistics[curr_conv_name]
+            # Compute mask using layer's own statistics
+            stats = self.statistics[layer_name]
             mask = self.criterion.get_pruning_mask(stats, layer_sparsity)
-            self._pruning_masks[prev_conv_name] = mask
+            self._pruning_masks[layer_name] = mask
 
-            # Prune OUTPUT channels (filters) of previous conv
-            self._prune_conv_output(pruned_model, prev_conv_name, mask)
+            # 1. Prune OUTPUT channels (filters) of current layer
+            self._prune_conv_output(pruned_model, layer_name, mask)
 
-            # Prune BatchNorm if present
-            bn_name = self._find_bn_for_conv(prev_conv_name)
+            # 2. Prune BatchNorm if present (follows current conv)
+            bn_name = self._find_bn_for_conv(layer_name)
             if bn_name:
                 self._prune_batchnorm(pruned_model, bn_name, mask)
 
-            # Prune INPUT channels of current conv
-            self._prune_conv_input(pruned_model, curr_conv_name, mask)
+            # 3. Prune INPUT channels of the next layer
+            next_conv = self._find_next_conv(layer_name)
+            if next_conv:
+                self._prune_conv_input(pruned_model, next_conv, mask)
 
         # Handle the connection between last conv and first linear (if applicable)
         self._adjust_linear_input(pruned_model, conv_layers)
@@ -532,7 +525,7 @@ class ConvTropicalPruner:
 
     def _adjust_linear_input(
         self,
-        model: nn.Module,
+        pruned_model: nn.Module,
         conv_layers: List[str],
     ) -> None:
         """
@@ -559,7 +552,7 @@ class ConvTropicalPruner:
             return
 
         first_linear_name = linear_layers[0]
-        linear_module = dict(model.named_modules())[first_linear_name]
+        linear_module = dict(pruned_model.named_modules())[first_linear_name]
 
         # Get the new feature dimension from the last pruned conv
         # This requires knowing the spatial dimensions, which we estimate
@@ -575,7 +568,7 @@ class ConvTropicalPruner:
             return
 
         kept_channels = mask.sum().item()
-        last_conv = dict(model.named_modules()).get(last_conv_name)
+        last_conv = dict(pruned_model.named_modules()).get(last_conv_name)
         if last_conv is None:
             return
 
@@ -626,7 +619,7 @@ class ConvTropicalPruner:
         if linear_module.bias is not None:
             new_linear.bias.data = linear_module.bias.data.clone()
 
-        self._replace_layer(model, first_linear_name, new_linear)
+        self._replace_layer(pruned_model, first_linear_name, new_linear)
 
     def _replace_layer(
         self,
