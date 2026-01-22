@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tropical-pruning"
-version = "0.1.0"
+version = "0.3.0"
 description = "Winner-based Tropical Structured Pruning for Neural Networks"
 readme = "README.md"
 license = "MIT"
@@ -54,8 +54,14 @@ experiment = [
     "pandas>=1.5",
     "scikit-learn>=1.2",
 ]
+llm = [
+    "transformers>=4.36",
+    "accelerate>=0.25",
+    "datasets>=2.14",
+    "sentencepiece>=0.1.99",
+]
 all = [
-    "tropical-pruning[dev,experiment]",
+    "tropical-pruning[dev,experiment,llm]",
 ]
 
 [project.urls]
