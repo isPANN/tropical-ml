@@ -21,6 +21,11 @@ Requirements:
     pip install tropical-pruning[llm]
 """
 
+# Set HuggingFace mirror BEFORE any imports
+import os
+if "HF_ENDPOINT" not in os.environ:
+    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
 import argparse
 import sys
 from typing import Optional
@@ -54,8 +59,8 @@ def parse_args():
     parser.add_argument(
         "--seq-length",
         type=int,
-        default=2048,
-        help="Sequence length for calibration",
+        default=512,
+        help="Sequence length for calibration (default: 512, reduce if OOM)",
     )
     parser.add_argument(
         "--batch-size",
@@ -87,6 +92,22 @@ def parse_args():
         default="float16",
         help="Model dtype",
     )
+    parser.add_argument(
+        "--load-in-8bit",
+        action="store_true",
+        help="Load model in 8-bit quantization (saves memory)",
+    )
+    parser.add_argument(
+        "--load-in-4bit",
+        action="store_true",
+        help="Load model in 4-bit quantization (saves more memory)",
+    )
+    parser.add_argument(
+        "--low-cpu-mem-usage",
+        action="store_true",
+        default=True,
+        help="Use low CPU memory usage mode (default: True)",
+    )
 
     return parser.parse_args()
 
@@ -101,6 +122,13 @@ def main():
     print(f"Target sparsity: {args.sparsity * 100:.1f}%")
     print(f"Calibration samples: {args.num_samples}")
     print(f"Sequence length: {args.seq_length}")
+    print(f"Batch size: {args.batch_size}")
+    if args.load_in_4bit:
+        print("Quantization: 4-bit")
+    elif args.load_in_8bit:
+        print("Quantization: 8-bit")
+    else:
+        print(f"Quantization: None (dtype: {args.dtype})")
     print()
 
     # Import LLM pruning modules
@@ -130,10 +158,21 @@ def main():
 
     # Step 1: Load model
     print("Step 1: Loading model...")
+    load_kwargs = {}
+    if args.load_in_8bit:
+        load_kwargs["load_in_8bit"] = True
+        print("  Using 8-bit quantization")
+    elif args.load_in_4bit:
+        load_kwargs["load_in_4bit"] = True
+        print("  Using 4-bit quantization")
+    if args.low_cpu_mem_usage:
+        load_kwargs["low_cpu_mem_usage"] = True
+    
     model, tokenizer = load_model_and_tokenizer(
         args.model,
         device_map=args.device,
         torch_dtype=torch_dtype,
+        **load_kwargs,
     )
     original_params = count_parameters(model)
     print(f"  Parameters: {original_params:,}")

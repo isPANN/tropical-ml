@@ -69,7 +69,7 @@ deps: clone-gemm
 	@echo "Building tropical-gemm (CPU)..."
 	cd $(TROPICAL_GEMM_DIR)/crates/tropical-gemm-python && \
 		$(MATURIN) build --release && \
-		$(PYTHON) -m pip install target/wheels/*.whl --force-reinstall
+		uv pip install --system --no-deps ../../target/wheels/*.whl --force-reinstall
 	@echo "tropical-gemm (CPU) installed."
 
 # Build and install tropical-gemm with CUDA
@@ -79,7 +79,7 @@ deps-cuda: clone-gemm
 	@which maturin >/dev/null 2>&1 || (echo "Installing maturin..." && pip install maturin)
 	cd $(TROPICAL_GEMM_DIR)/crates/tropical-gemm-python && \
 		maturin build --release --features cuda && \
-		$(PYTHON) -m pip install target/wheels/*.whl --force-reinstall
+		uv pip install --system --no-deps ../../target/wheels/*.whl --force-reinstall
 	@echo "tropical-gemm (CUDA) installed."
 
 # Alternative: Build directly with maturin and system python (bypasses uv)
@@ -89,7 +89,7 @@ deps-cuda-direct: clone-gemm
 	@which python3 >/dev/null 2>&1 || (echo "Error: python3 not found" && exit 1)
 	cd $(TROPICAL_GEMM_DIR)/crates/tropical-gemm-python && \
 		maturin build --release --features cuda && \
-		python3 -m pip install target/wheels/*.whl --force-reinstall
+		uv pip install --system --no-deps ../../target/wheels/*.whl --force-reinstall
 	@echo "tropical-gemm (CUDA) installed."
 
 # Update tropical-gemm to latest
@@ -127,7 +127,7 @@ c_arg, arg = tg.maxplus_matmul_with_argmax(a, b); \
 print('MaxPlus with argmax: PASSED')"
 
 check-cuda:
-	@$(PYTHON) -c "import tropical_gemm as tg; print(f'CUDA available: {tg.cuda_available()}') if hasattr(tg, 'cuda_available') else print('CUDA support not compiled (cuda_available not found)')"
+	@python3 -c "import tropical_gemm as tg; print(f'CUDA available: {tg.cuda_available()}') if hasattr(tg, 'cuda_available') else print('CUDA support not compiled (cuda_available not found)')"
 
 #==============================================================================
 # Cleanup

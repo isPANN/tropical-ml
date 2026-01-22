@@ -253,6 +253,24 @@ def load_model_and_tokenizer(
     Returns:
         Tuple of (model, tokenizer).
     """
+    # Support HuggingFace mirror (hf-mirror.com)
+    # Set HF_ENDPOINT BEFORE importing transformers to ensure it's used
+    import os
+    if "HF_ENDPOINT" not in os.environ:
+        # Default to hf-mirror.com mirror for better connectivity in China
+        # This environment variable is used by huggingface_hub library
+        os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+    
+    # Also try to configure huggingface_hub directly if available
+    try:
+        import huggingface_hub
+        # Force update endpoint if not already set
+        if hasattr(huggingface_hub, 'constants'):
+            # Update the endpoint in huggingface_hub
+            huggingface_hub.constants.ENDPOINT = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+    except (ImportError, AttributeError):
+        pass
+    
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer
     except ImportError:
@@ -278,13 +296,51 @@ def load_model_and_tokenizer(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Load model
+    # Handle quantization if requested
+    load_kwargs = kwargs.copy()
+    load_in_8bit = load_kwargs.pop("load_in_8bit", False)
+    load_in_4bit = load_kwargs.pop("load_in_4bit", False)
+    low_cpu_mem_usage = load_kwargs.pop("low_cpu_mem_usage", True)
+    
+    # Apply quantization if requested
+    if load_in_8bit or load_in_4bit:
+        try:
+            from transformers import BitsAndBytesConfig
+            if load_in_4bit:
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch_dtype,
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type="nf4",
+                )
+            else:
+                quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+            load_kwargs["quantization_config"] = quantization_config
+        except ImportError:
+            raise ImportError(
+                "bitsandbytes is required for quantization. "
+                "Install with: pip install bitsandbytes"
+            )
+    
+    # Load model with memory optimizations
+    # If device_map is "auto" and CUDA is available, use balanced memory allocation
+    if device_map == "auto" and torch.cuda.is_available():
+        # Try to use max_memory to prevent OOM
+        try:
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
+            # Reserve some memory for other operations
+            max_memory = {0: f"{int(gpu_memory * 0.9)}GiB"}
+            load_kwargs["max_memory"] = max_memory
+        except Exception:
+            pass  # If max_memory fails, continue without it
+    
     model = AutoModelForCausalLM.from_pretrained(
         model_name_or_path,
         device_map=device_map,
         torch_dtype=torch_dtype,
         trust_remote_code=trust_remote_code,
-        **kwargs,
+        low_cpu_mem_usage=low_cpu_mem_usage,
+        **load_kwargs,
     )
 
     model.eval()
