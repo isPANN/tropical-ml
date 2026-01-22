@@ -289,6 +289,9 @@ class ConvWinnerCounter:
         all_argmax = []
         all_margin = [] if self.track_margin else None
 
+        # Get L from patches shape
+        L = patches.shape[2]
+
         for b in range(B):
             # patches[b]: (K, L) -> transpose to (L, K)
             patch_b = patches[b].T  # (L, K)
@@ -299,11 +302,21 @@ class ConvWinnerCounter:
             patch_np = patch_b.detach().cpu().numpy().astype('float32')
             weight_t_np = weight_flat.T.detach().cpu().numpy().astype('float32')
 
+            # Ensure 2D arrays for tropical_gemm
+            if patch_np.ndim == 1:
+                patch_np = patch_np.reshape(1, -1)  # (1, K)
+            if weight_t_np.ndim == 1:
+                weight_t_np = weight_t_np.reshape(-1, 1)  # (K, 1)
+
             # tropical_gemm computes C[i,j] = max_k(A[i,k] + B[k,j])
             result_np, argmax_np = tg.maxplus_matmul_with_argmax(patch_np, weight_t_np)
 
             # result_np: (L, C_out) - tropical feature map values
             # argmax_np: (L, C_out) - which k achieved max for each (l, c_out)
+
+            # Ensure 2D result
+            if result_np.ndim == 1:
+                result_np = result_np.reshape(L, C_out)
 
             # Convert to tensors
             result_b = torch.from_numpy(result_np).to(x.device)  # (L, C_out)
@@ -369,7 +382,18 @@ class ConvWinnerCounter:
                 patch_np = patch_bg.detach().cpu().numpy().astype('float32')
                 weight_t_np = weight_g_flat.T.detach().cpu().numpy().astype('float32')
 
+                # Ensure 2D arrays for tropical_gemm
+                if patch_np.ndim == 1:
+                    patch_np = patch_np.reshape(1, -1)
+                if weight_t_np.ndim == 1:
+                    weight_t_np = weight_t_np.reshape(-1, 1)
+
                 result_np, _ = tg.maxplus_matmul_with_argmax(patch_np, weight_t_np)
+
+                # Ensure 2D result
+                if result_np.ndim == 1:
+                    result_np = result_np.reshape(L, c_out_per_group)
+
                 result_bg = torch.from_numpy(result_np).to(x.device)  # (L, c_out_per_group)
                 group_results.append(result_bg)
 
