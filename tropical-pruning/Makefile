@@ -115,12 +115,7 @@ c_arg, arg = tg.maxplus_matmul_with_argmax(a, b); \
 print('MaxPlus with argmax: PASSED')"
 
 check-cuda:
-	@$(PYTHON) -c "\
-import tropical_gemm as tg; \
-if hasattr(tg, 'cuda_available'): \
-    print(f'CUDA available: {tg.cuda_available()}'); \
-else: \
-    print('CUDA support not compiled (cuda_available not found)')"
+	@$(PYTHON) -c "import tropical_gemm as tg; print(f'CUDA available: {tg.cuda_available()}') if hasattr(tg, 'cuda_available') else print('CUDA support not compiled (cuda_available not found)')"
 
 #==============================================================================
 # Cleanup
