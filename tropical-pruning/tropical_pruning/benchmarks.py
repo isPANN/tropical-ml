@@ -207,13 +207,13 @@ class PruningBenchmark:
         Returns:
             TimingResult with measurements.
         """
-        from tropical_pruning.counter import create_winner_counter
+        from tropical_pruning.counter import WinnerCounter
 
         times = []
 
         for _ in range(n_runs):
             model_copy = copy.deepcopy(model).to(self.device)
-            counter = create_winner_counter(model_copy, device=self.device)
+            counter = WinnerCounter(model_copy, device=self.device)
 
             # Warmup
             batch = next(iter(dataloader))
@@ -325,13 +325,8 @@ class PruningBenchmark:
             start = time.perf_counter()
 
             if method == "tropical":
-                has_conv = any(isinstance(m, nn.Conv2d) for m in model_copy.modules())
-                if has_conv:
-                    from tropical_pruning.conv_pruner import ConvTropicalPruner
-                    pruner = ConvTropicalPruner(model_copy, statistics)
-                else:
-                    from tropical_pruning.pruner import TropicalPruner
-                    pruner = TropicalPruner(model_copy, statistics)
+                from tropical_pruning.pruner import TropicalPruner
+                pruner = TropicalPruner(model_copy, statistics)
                 _ = pruner.prune(sparsity, inplace=True)
 
             elif method.startswith("magnitude"):
@@ -471,8 +466,8 @@ class PruningBenchmark:
         ))
 
         # Collect statistics once (used by tropical method)
-        from tropical_pruning.counter import create_winner_counter
-        counter = create_winner_counter(baseline_model, device=self.device)
+        from tropical_pruning.counter import WinnerCounter
+        counter = WinnerCounter(baseline_model, device=self.device)
         stats = counter.collect(calibration_loader, show_progress=False)
         counter.remove_hooks()
 
@@ -549,13 +544,8 @@ class PruningBenchmark:
         model_copy = copy.deepcopy(model)
 
         if method == "tropical":
-            has_conv = any(isinstance(m, nn.Conv2d) for m in model_copy.modules())
-            if has_conv:
-                from tropical_pruning.conv_pruner import ConvTropicalPruner
-                pruner = ConvTropicalPruner(model_copy, statistics)
-            else:
-                from tropical_pruning.pruner import TropicalPruner
-                pruner = TropicalPruner(model_copy, statistics)
+            from tropical_pruning.pruner import TropicalPruner
+            pruner = TropicalPruner(model_copy, statistics)
             return pruner.prune(sparsity, inplace=True)
 
         elif method.startswith("magnitude"):

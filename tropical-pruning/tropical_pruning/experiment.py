@@ -454,9 +454,9 @@ class ExperimentRunner:
         calibration_loader: DataLoader,
     ) -> Dict:
         """Collect winner statistics from calibration data."""
-        from tropical_pruning.counter import create_winner_counter
+        from tropical_pruning.counter import WinnerCounter
 
-        counter = create_winner_counter(
+        counter = WinnerCounter(
             model,
             track_margin=self.config.track_margin,
             device=self.device,
@@ -477,16 +477,9 @@ class ExperimentRunner:
             pruner = pruner_factory(model, stats, method)
             return pruner.prune(sparsity, inplace=True)
 
-        # Check if model has conv layers
-        has_conv = any(isinstance(m, nn.Conv2d) for m in model.modules())
-
         if method == "tropical":
-            if has_conv:
-                from tropical_pruning.conv_pruner import ConvTropicalPruner
-                pruner = ConvTropicalPruner(model, stats)
-            else:
-                from tropical_pruning.pruner import TropicalPruner
-                pruner = TropicalPruner(model, stats)
+            from tropical_pruning.pruner import TropicalPruner
+            pruner = TropicalPruner(model, stats)
             return pruner.prune(sparsity, inplace=True)
 
         elif method == "magnitude_l1":
@@ -601,18 +594,13 @@ def run_calibration_ablation(
             model = model_fn().to(device)
 
             # Collect statistics
-            from tropical_pruning.counter import create_winner_counter
-            counter = create_winner_counter(model, device=device)
+            from tropical_pruning.counter import WinnerCounter
+            counter = WinnerCounter(model, device=device)
             stats = counter.collect(cal_loader, show_progress=False)
 
             # Prune
-            has_conv = any(isinstance(m, nn.Conv2d) for m in model.modules())
-            if has_conv:
-                from tropical_pruning.conv_pruner import ConvTropicalPruner
-                pruner = ConvTropicalPruner(model, stats)
-            else:
-                from tropical_pruning.pruner import TropicalPruner
-                pruner = TropicalPruner(model, stats)
+            from tropical_pruning.pruner import TropicalPruner
+            pruner = TropicalPruner(model, stats)
 
             pruned_model = pruner.prune(sparsity, inplace=True)
 
