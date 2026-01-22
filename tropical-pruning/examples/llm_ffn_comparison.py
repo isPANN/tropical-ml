@@ -4,14 +4,20 @@ LLM FFN Pruning Comparison: Tropical vs SOTA Baselines
 
 Compare tropical pruning with multiple baseline methods on LLM FFN layers:
 - Magnitude pruning (L1 norm)
-- Activation-based pruning
 - Wanda-style pruning (weight * activation)
 - FLAP-style pruning (weight * fluctuation)
 
-Results are automatically saved to results/ directory with timestamp.
+Supports single or multiple sparsity levels. Results auto-saved to results/.
 
 Usage:
-    python llm_ffn_comparison.py --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --sparsity 0.3
+    # Single sparsity
+    python llm_ffn_comparison.py --sparsity 0.3
+
+    # Multiple sparsities (sweep)
+    python llm_ffn_comparison.py --sparsity 0.2,0.3,0.5,0.7
+
+    # Custom model
+    python llm_ffn_comparison.py --model meta-llama/Llama-2-7b-hf --sparsity 0.3,0.5
 
 References:
 - LLM-Pruner: https://github.com/horseee/LLM-Pruner (NeurIPS 2023)
@@ -31,7 +37,7 @@ import platform
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, List, Any
 import torch
 
 
@@ -75,27 +81,49 @@ def get_system_info() -> Dict[str, Any]:
     return info
 
 
-def save_results(results: Dict, args, system_info: Dict, output_dir: str = "results") -> tuple:
+def save_results(
+    results: Dict,
+    args: argparse.Namespace,
+    system_info: Dict,
+    baseline_ppl: float,
+    original_params: int,
+    never_win_neurons: int,
+    total_neurons: int,
+    output_dir: str = "results",
+) -> tuple:
     """Save results to JSON and CSV."""
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     model_short = args.model.split("/")[-1].replace("-", "_")
-    sparsity_str = f"{int(args.sparsity * 100)}pct"
-    base_name = f"ffn_comparison_{model_short}_{sparsity_str}_{timestamp}"
+    sparsities = [float(s.strip()) for s in args.sparsity.split(",")]
+    sparsity_str = "_".join([f"{int(s*100)}" for s in sparsities])
+    base_name = f"ffn_comparison_{model_short}_s{sparsity_str}_{timestamp}"
 
     full_data = {
-        "experiment": "LLM FFN Pruning Comparison",
+        "experiment": {
+            "name": "LLM FFN Pruning Comparison",
+            "script": "llm_ffn_comparison.py",
+        },
         "config": {
             "model": args.model,
-            "sparsity": args.sparsity,
+            "sparsities": sparsities,
             "num_samples": args.num_samples,
             "seq_length": args.seq_length,
             "eval_samples": args.eval_samples,
             "methods": args.methods,
         },
         "system": system_info,
+        "baseline": {
+            "perplexity": baseline_ppl,
+            "parameters": original_params,
+        },
+        "analysis": {
+            "never_win_neurons": never_win_neurons,
+            "total_neurons": total_neurons,
+            "never_win_ratio": never_win_neurons / total_neurons if total_neurons > 0 else 0,
+        },
         "results": results,
     }
 
@@ -107,29 +135,48 @@ def save_results(results: Dict, args, system_info: Dict, output_dir: str = "resu
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
-            "model", "sparsity", "method", "params", "compression",
-            "ppl", "delta_ppl", "timestamp"
+            "model", "method", "sparsity", "params", "compression",
+            "ppl", "delta_ppl", "delta_ppl_pct", "baseline_ppl",
+            "num_samples", "seq_length", "timestamp"
         ])
-        for method, data in results.items():
-            writer.writerow([
-                args.model, args.sparsity, method,
-                data["params"], round(data["compression"], 4),
-                round(data["ppl"], 4), round(data["delta_ppl"], 4),
-                system_info["timestamp"],
-            ])
+        for method, sparsity_results in results.items():
+            if method == "Baseline":
+                continue
+            for sparsity, data in sparsity_results.items():
+                writer.writerow([
+                    args.model, method, sparsity,
+                    data["params"], round(data["compression"], 4),
+                    round(data["ppl"], 4), round(data["delta_ppl"], 4),
+                    round(data["delta_ppl_pct"], 4), round(baseline_ppl, 4),
+                    args.num_samples, args.seq_length, system_info["timestamp"],
+                ])
 
     return str(json_path), str(csv_path)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Compare tropical vs baseline pruning")
-    parser.add_argument("--model", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0")
-    parser.add_argument("--sparsity", type=float, default=0.3)
-    parser.add_argument("--num-samples", type=int, default=64, help="Calibration samples")
-    parser.add_argument("--seq-length", type=int, default=512)
-    parser.add_argument("--eval-samples", type=int, default=50, help="Perplexity eval samples")
+    parser = argparse.ArgumentParser(
+        description="Compare tropical vs baseline pruning methods",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s --sparsity 0.3                    # Single sparsity
+  %(prog)s --sparsity 0.2,0.3,0.5,0.7        # Multiple sparsities
+  %(prog)s --model meta-llama/Llama-2-7b-hf  # Different model
+        """
+    )
+    parser.add_argument("--model", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+                       help="HuggingFace model name or path")
+    parser.add_argument("--sparsity", type=str, default="0.2,0.3,0.5,0.7",
+                       help="Sparsity level(s), comma-separated (e.g., '0.3' or '0.2,0.3,0.5,0.7')")
+    parser.add_argument("--num-samples", type=int, default=64,
+                       help="Number of calibration samples")
+    parser.add_argument("--seq-length", type=int, default=512,
+                       help="Sequence length for calibration")
+    parser.add_argument("--eval-samples", type=int, default=50,
+                       help="Number of samples for perplexity evaluation")
     parser.add_argument("--methods", type=str, default="all",
-                       help="Methods to compare: all, tropical, magnitude, wanda, flap")
+                       help="Methods to compare: all, or comma-separated list (tropical,magnitude,wanda,flap)")
     parser.add_argument("--output-dir", type=str, default="results",
                        help="Directory to save results")
     parser.add_argument("--no-save", action="store_true",
@@ -144,17 +191,14 @@ def count_parameters(model) -> int:
 def compute_perplexity(model, tokenizer, num_samples=50, seq_length=512) -> float:
     """Compute perplexity on WikiText-2 test set."""
     from datasets import load_dataset
-
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
     text = "\n\n".join(dataset["text"])
-
     encodings = tokenizer(text, return_tensors="pt", truncation=False, add_special_tokens=False)
 
     if hasattr(model, 'device'):
         device = model.device
     else:
         device = next(model.parameters()).device
-
     input_ids = encodings["input_ids"].to(device)
 
     model.eval()
@@ -167,17 +211,14 @@ def compute_perplexity(model, tokenizer, num_samples=50, seq_length=512) -> floa
             chunk = input_ids[:, i:i + seq_length]
             outputs = model(chunk)
             logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
-
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = chunk[..., 1:].contiguous()
-
             loss = torch.nn.functional.cross_entropy(
                 shift_logits.view(-1, shift_logits.size(-1)),
                 shift_labels.view(-1),
                 reduction="mean"
             )
             nlls.append(loss)
-
             if len(nlls) >= num_samples:
                 break
 
@@ -185,7 +226,6 @@ def compute_perplexity(model, tokenizer, num_samples=50, seq_length=512) -> floa
 
 
 def free_memory():
-    """Free GPU memory."""
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -193,16 +233,23 @@ def free_memory():
 
 def main():
     args = parse_args()
+    sparsities = [float(s.strip()) for s in args.sparsity.split(",")]
     system_info = get_system_info()
 
-    print("=" * 80)
+    # Determine methods to run
+    if args.methods == "all":
+        methods = ["tropical", "magnitude", "wanda", "flap"]
+    else:
+        methods = [m.strip().lower() for m in args.methods.split(",")]
+
+    print("=" * 90)
     print("LLM FFN Pruning Comparison: Tropical vs SOTA Baselines")
-    print("=" * 80)
+    print("=" * 90)
     print(f"Timestamp: {system_info['timestamp']}")
     print(f"Model: {args.model}")
-    print(f"Target sparsity: {args.sparsity * 100:.1f}%")
-    print(f"Calibration samples: {args.num_samples}")
-    print(f"Sequence length: {args.seq_length}")
+    print(f"Sparsities: {[f'{s*100:.0f}%' for s in sparsities]}")
+    print(f"Methods: {methods}")
+    print(f"Calibration: {args.num_samples} samples x {args.seq_length} tokens")
     if system_info["torch"]["cuda_available"]:
         gpu = system_info["gpu"]["devices"][0]
         print(f"GPU: {gpu['name']} ({gpu['total_memory_gb']}GB)")
@@ -219,14 +266,7 @@ def main():
         MagnitudePruner,
         WandaStylePruner,
         FLAPStylePruner,
-        get_baseline_pruner,
     )
-
-    # Determine which methods to run
-    if args.methods == "all":
-        methods = ["tropical", "magnitude", "wanda", "flap"]
-    else:
-        methods = [m.strip() for m in args.methods.split(",")]
 
     # Load model
     print("Loading model...")
@@ -236,7 +276,7 @@ def main():
         torch_dtype=torch.float16,
     )
     original_params = count_parameters(model)
-    print(f"  Original parameters: {original_params:,}")
+    print(f"  Parameters: {original_params:,}")
     print()
 
     # Compute baseline perplexity
@@ -245,187 +285,202 @@ def main():
     print(f"  Baseline PPL: {baseline_ppl:.2f}")
     print()
 
-    # Create calibration data (shared across methods)
+    # Create calibration data
     print("Creating calibration dataset...")
     calibration_loader = CalibrationDataset.from_wikitext2(
-        tokenizer,
-        num_samples=args.num_samples,
-        seq_length=args.seq_length,
+        tokenizer, num_samples=args.num_samples, seq_length=args.seq_length
     )
     print(f"  Created {len(calibration_loader)} batches")
     print()
 
-    # Results storage
-    results: Dict[str, Dict] = {
-        "Baseline": {
-            "params": original_params,
-            "compression": 1.0,
-            "ppl": baseline_ppl,
-            "delta_ppl": 0.0,
-        }
-    }
+    # Collect tropical statistics (once, reuse for all sparsities)
+    total_never_win = 0
+    total_neurons = 0
+    tropical_stats = None
 
-    # === Method 1: Tropical Pruning ===
     if "tropical" in methods:
-        print("-" * 80)
-        print("Method: TROPICAL PRUNING (winner-based)")
-        print("-" * 80)
-
-        print("  Collecting winner statistics...")
+        print("Collecting tropical winner statistics...")
         counter = FFNWinnerCounter(model, track_margin=False)
-        stats = counter.collect(calibration_loader, show_progress=True)
+        tropical_stats = counter.collect(calibration_loader, show_progress=True)
         counter.remove_hooks()
 
-        # Analyze never-win neurons
         analysis = counter.analyze()
         total_never_win = sum(a["never_win"] for a in analysis.values())
         total_neurons = sum(a["intermediate_size"] for a in analysis.values())
         print(f"  Never-win neurons: {total_never_win:,} / {total_neurons:,} ({total_never_win/total_neurons*100:.1f}%)")
-
-        print("  Pruning...")
-        pruner = FFNTropicalPruner(model, stats)
-        tropical_model = pruner.prune(sparsity=args.sparsity, inplace=False)
-        tropical_params = count_parameters(tropical_model)
-
-        print("  Computing perplexity...")
-        tropical_ppl = compute_perplexity(tropical_model, tokenizer, args.eval_samples, args.seq_length)
-
-        results["Tropical"] = {
-            "params": tropical_params,
-            "compression": original_params / tropical_params,
-            "ppl": tropical_ppl,
-            "delta_ppl": tropical_ppl - baseline_ppl,
-        }
-        print(f"  Parameters: {tropical_params:,} ({results['Tropical']['compression']:.2f}x)")
-        print(f"  Perplexity: {tropical_ppl:.2f} (Δ = +{tropical_ppl - baseline_ppl:.2f})")
         print()
 
-        del tropical_model
-        free_memory()
-
-    # === Method 2: Magnitude Pruning ===
+    # Initialize baseline pruners (once, reuse for all sparsities)
+    pruners = {}
     if "magnitude" in methods:
-        print("-" * 80)
-        print("Method: MAGNITUDE PRUNING (L1 norm baseline)")
-        print("-" * 80)
+        print("Initializing magnitude pruner...")
+        pruners["Magnitude"] = MagnitudePruner(model, norm="l1")
 
-        print("  Pruning...")
-        pruner = MagnitudePruner(model, norm="l1")
-        magnitude_model = pruner.prune(sparsity=args.sparsity, inplace=False)
-        magnitude_params = count_parameters(magnitude_model)
-
-        print("  Computing perplexity...")
-        magnitude_ppl = compute_perplexity(magnitude_model, tokenizer, args.eval_samples, args.seq_length)
-
-        results["Magnitude"] = {
-            "params": magnitude_params,
-            "compression": original_params / magnitude_params,
-            "ppl": magnitude_ppl,
-            "delta_ppl": magnitude_ppl - baseline_ppl,
-        }
-        print(f"  Parameters: {magnitude_params:,} ({results['Magnitude']['compression']:.2f}x)")
-        print(f"  Perplexity: {magnitude_ppl:.2f} (Δ = +{magnitude_ppl - baseline_ppl:.2f})")
-        print()
-
-        del magnitude_model
-        free_memory()
-
-    # === Method 3: Wanda-style Pruning ===
     if "wanda" in methods:
-        print("-" * 80)
-        print("Method: WANDA-STYLE PRUNING (weight * activation)")
-        print("-" * 80)
+        print("Initializing Wanda pruner (collecting activations)...")
+        pruners["Wanda"] = WandaStylePruner(model, calibration_loader)
 
-        print("  Collecting activation statistics...")
-        pruner = WandaStylePruner(model, calibration_loader)
-
-        print("  Pruning...")
-        wanda_model = pruner.prune(sparsity=args.sparsity, inplace=False)
-        wanda_params = count_parameters(wanda_model)
-
-        print("  Computing perplexity...")
-        wanda_ppl = compute_perplexity(wanda_model, tokenizer, args.eval_samples, args.seq_length)
-
-        results["Wanda"] = {
-            "params": wanda_params,
-            "compression": original_params / wanda_params,
-            "ppl": wanda_ppl,
-            "delta_ppl": wanda_ppl - baseline_ppl,
-        }
-        print(f"  Parameters: {wanda_params:,} ({results['Wanda']['compression']:.2f}x)")
-        print(f"  Perplexity: {wanda_ppl:.2f} (Δ = +{wanda_ppl - baseline_ppl:.2f})")
-        print()
-
-        del wanda_model
-        free_memory()
-
-    # === Method 4: FLAP-style Pruning ===
     if "flap" in methods:
-        print("-" * 80)
-        print("Method: FLAP-STYLE PRUNING (weight * fluctuation)")
-        print("-" * 80)
+        print("Initializing FLAP pruner (collecting fluctuations)...")
+        pruners["FLAP"] = FLAPStylePruner(model, calibration_loader)
 
-        print("  Collecting fluctuation statistics...")
-        pruner = FLAPStylePruner(model, calibration_loader)
+    print()
 
-        print("  Pruning...")
-        flap_model = pruner.prune(sparsity=args.sparsity, inplace=False)
-        flap_params = count_parameters(flap_model)
+    # Results storage: {method: {sparsity: {metrics}}}
+    results: Dict[str, Dict[float, Dict]] = {name: {} for name in ["Tropical"] + list(pruners.keys())}
 
-        print("  Computing perplexity...")
-        flap_ppl = compute_perplexity(flap_model, tokenizer, args.eval_samples, args.seq_length)
+    # Run comparison for each sparsity
+    for sparsity in sparsities:
+        print("=" * 90)
+        print(f"SPARSITY: {sparsity*100:.0f}%")
+        print("=" * 90)
 
-        results["FLAP"] = {
-            "params": flap_params,
-            "compression": original_params / flap_params,
-            "ppl": flap_ppl,
-            "delta_ppl": flap_ppl - baseline_ppl,
-        }
-        print(f"  Parameters: {flap_params:,} ({results['FLAP']['compression']:.2f}x)")
-        print(f"  Perplexity: {flap_ppl:.2f} (Δ = +{flap_ppl - baseline_ppl:.2f})")
+        # Tropical pruning
+        if "tropical" in methods and tropical_stats is not None:
+            print(f"  Tropical...", end=" ", flush=True)
+            pruner = FFNTropicalPruner(model, tropical_stats)
+            pruned = pruner.prune(sparsity=sparsity, inplace=False)
+            params = count_parameters(pruned)
+            ppl = compute_perplexity(pruned, tokenizer, args.eval_samples, args.seq_length)
+
+            results["Tropical"][sparsity] = {
+                "params": params,
+                "compression": original_params / params,
+                "ppl": ppl,
+                "delta_ppl": ppl - baseline_ppl,
+                "delta_ppl_pct": (ppl - baseline_ppl) / baseline_ppl * 100,
+            }
+            print(f"PPL={ppl:.2f} (Δ={ppl-baseline_ppl:+.2f})")
+
+            del pruned
+            free_memory()
+
+        # Baseline methods
+        for name, pruner in pruners.items():
+            print(f"  {name}...", end=" ", flush=True)
+            pruned = pruner.prune(sparsity=sparsity, inplace=False)
+            params = count_parameters(pruned)
+            ppl = compute_perplexity(pruned, tokenizer, args.eval_samples, args.seq_length)
+
+            results[name][sparsity] = {
+                "params": params,
+                "compression": original_params / params,
+                "ppl": ppl,
+                "delta_ppl": ppl - baseline_ppl,
+                "delta_ppl_pct": (ppl - baseline_ppl) / baseline_ppl * 100,
+            }
+            print(f"PPL={ppl:.2f} (Δ={ppl-baseline_ppl:+.2f})")
+
+            del pruned
+            free_memory()
+
         print()
 
-        del flap_model
-        free_memory()
-
-    # === Summary ===
-    print("=" * 80)
+    # === Final Summary ===
+    print("=" * 90)
     print("COMPARISON SUMMARY")
-    print("=" * 80)
-    print(f"{'Method':<15} {'Params':>18} {'Compress':>10} {'PPL':>10} {'Δ PPL':>10}")
-    print("-" * 80)
+    print("=" * 90)
+    print()
 
-    for method, data in results.items():
-        print(f"{method:<15} {data['params']:>18,} {data['compression']:>10.2f}x {data['ppl']:>10.2f} {data['delta_ppl']:>+10.2f}")
+    # Filter out empty results
+    results = {k: v for k, v in results.items() if v}
+    method_names = list(results.keys())
 
-    print("-" * 80)
+    # Header
+    header = f"{'Sparsity':<12}"
+    for name in method_names:
+        header += f"{name:>12}"
+    header += f"{'Best':>12}"
+    print(header)
+    print("-" * 90)
 
-    # Find winner (lowest PPL among pruned methods)
-    pruned_results = {k: v for k, v in results.items() if k != "Baseline"}
-    if pruned_results:
-        best_method = min(pruned_results.keys(), key=lambda k: pruned_results[k]["ppl"])
-        best_ppl = pruned_results[best_method]["ppl"]
+    # Baseline row
+    row = f"{'0% (base)':<12}"
+    for _ in method_names:
+        row += f"{baseline_ppl:>12.2f}"
+    row += f"{'-':>12}"
+    print(row)
 
-        print(f"\nBest method: {best_method} (PPL = {best_ppl:.2f})")
+    # Results rows
+    wins = {name: 0 for name in method_names}
+    for sparsity in sparsities:
+        row = f"{f'{sparsity*100:.0f}%':<12}"
+        best_ppl = float("inf")
+        best_method = ""
 
-        # Compare tropical with others
-        if "Tropical" in pruned_results:
-            tropical_ppl = pruned_results["Tropical"]["ppl"]
-            for method, data in pruned_results.items():
-                if method != "Tropical":
-                    diff = data["ppl"] - tropical_ppl
-                    if diff > 0:
-                        print(f"  Tropical beats {method} by {diff:.2f} PPL ({diff/data['ppl']*100:.1f}% better)")
-                    elif diff < 0:
-                        print(f"  {method} beats Tropical by {-diff:.2f} PPL ({-diff/tropical_ppl*100:.1f}% better)")
-                    else:
-                        print(f"  Tropical ties with {method}")
+        for name in method_names:
+            ppl = results[name][sparsity]["ppl"]
+            row += f"{ppl:>12.2f}"
+            if ppl < best_ppl:
+                best_ppl = ppl
+                best_method = name
 
-    print("=" * 80)
+        wins[best_method] += 1
+        row += f"{best_method:>12}"
+        print(row)
+
+    print("-" * 90)
+
+    # Wins row
+    row = f"{'Wins':<12}"
+    for name in method_names:
+        row += f"{wins[name]:>12}"
+    print(row)
+    print()
+
+    # Delta PPL table
+    print("Perplexity Increase (Δ PPL):")
+    print("-" * 90)
+    header = f"{'Sparsity':<12}"
+    for name in method_names:
+        header += f"{name:>12}"
+    print(header)
+    print("-" * 90)
+
+    for sparsity in sparsities:
+        row = f"{f'{sparsity*100:.0f}%':<12}"
+        for name in method_names:
+            delta = results[name][sparsity]["delta_ppl"]
+            row += f"{delta:>+12.2f}"
+        print(row)
+
+    print("-" * 90)
+    print()
+
+    # Winner summary
+    best_method = max(wins.items(), key=lambda x: x[1])
+    print(f"Best method: {best_method[0]} ({best_method[1]}/{len(sparsities)} wins)")
+
+    if "Tropical" in results:
+        print()
+        print("Tropical vs others (average Δ PPL difference):")
+        for name in method_names:
+            if name != "Tropical":
+                diffs = []
+                for sparsity in sparsities:
+                    t_ppl = results["Tropical"][sparsity]["ppl"]
+                    o_ppl = results[name][sparsity]["ppl"]
+                    diffs.append(o_ppl - t_ppl)
+                avg_diff = sum(diffs) / len(diffs)
+                if avg_diff > 0:
+                    print(f"  Tropical beats {name} by avg {avg_diff:.2f} PPL")
+                else:
+                    print(f"  {name} beats Tropical by avg {-avg_diff:.2f} PPL")
+
+    print("=" * 90)
 
     # Auto-save results
     if not args.no_save:
-        json_path, csv_path = save_results(results, args, system_info, args.output_dir)
+        json_path, csv_path = save_results(
+            results=results,
+            args=args,
+            system_info=system_info,
+            baseline_ppl=baseline_ppl,
+            original_params=original_params,
+            never_win_neurons=total_never_win,
+            total_neurons=total_neurons,
+            output_dir=args.output_dir,
+        )
         print(f"\nResults saved to:")
         print(f"  JSON: {json_path}")
         print(f"  CSV:  {csv_path}")

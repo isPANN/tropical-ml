@@ -129,7 +129,7 @@ def view_result(filepath: str):
 
 
 def compare_results(filepaths: List[str]):
-    """Compare multiple result files."""
+    """Compare multiple result files with detailed analysis."""
     all_data = []
     for fp in filepaths:
         try:
@@ -137,23 +137,23 @@ def compare_results(filepaths: List[str]):
                 data = json.load(f)
                 data["_filepath"] = fp
                 all_data.append(data)
-        except Exception as e:
-            print(f"Error reading {fp}: {e}")
+        except Exception:
+            print(f"Error reading {fp}")
 
     if not all_data:
         print("No valid results to compare")
         return
 
-    print("=" * 90)
-    print("Comparison of Multiple Experiments")
-    print("=" * 90)
+    print("=" * 100)
+    print("Comparison of Experiments")
+    print("=" * 100)
 
     # Summary table
-    print(f"\n{'File':<40} {'Model':<20} {'Sparsity':<15} {'Best Method':<15}")
-    print("-" * 90)
+    print(f"\n{'File':<45} {'Model':<20} {'Sparsity':<15} {'Best Method':<20}")
+    print("-" * 100)
 
     for data in all_data:
-        filepath = Path(data["_filepath"]).name[:39]
+        filepath = Path(data["_filepath"]).name[:44]
         model = data.get("config", {}).get("model", "N/A").split("/")[-1][:19]
 
         results = data.get("results", {})
@@ -173,29 +173,97 @@ def compare_results(filepaths: List[str]):
         first_val = list(results.values())[0]
         if isinstance(first_val, dict) and "ppl" in first_val:
             # Single sparsity
-            best = min(results.items(), key=lambda x: x[1].get("ppl", float("inf")) if x[0] != "Baseline" else float("inf"))
-            best_method = f"{best[0]} ({best[1].get('ppl', 0):.2f})"
+            pruned = {k: v for k, v in results.items() if k != "Baseline"}
+            if pruned:
+                best = min(pruned.items(), key=lambda x: x[1].get("ppl", float("inf")))
+                best_method = f"{best[0]} ({best[1].get('ppl', 0):.2f})"
+            else:
+                best_method = "N/A"
         else:
             # Multi-sparsity - show wins
-            wins = {}
-            for method, sparsity_data in results.items():
-                wins[method] = 0
-            for s in list(results.values())[0].keys():
+            wins = {method: 0 for method in results.keys()}
+            sparsity_keys = list(list(results.values())[0].keys())
+            for s in sparsity_keys:
                 best_ppl = float("inf")
                 best_m = None
                 for method, sparsity_data in results.items():
-                    ppl = sparsity_data.get(s, {}).get("ppl", float("inf"))
+                    ppl = sparsity_data.get(s, sparsity_data.get(str(s), {})).get("ppl", float("inf"))
                     if ppl < best_ppl:
                         best_ppl = ppl
                         best_m = method
                 if best_m:
                     wins[best_m] += 1
-            best_method = max(wins.items(), key=lambda x: x[1])
-            best_method = f"{best_method[0]} ({best_method[1]} wins)"
+            best = max(wins.items(), key=lambda x: x[1])
+            best_method = f"{best[0]} ({best[1]}/{len(sparsity_keys)} wins)"
 
-        print(f"{filepath:<40} {model:<20} {sparsity:<15} {best_method:<15}")
+        print(f"{filepath:<45} {model:<20} {sparsity:<15} {best_method:<20}")
 
-    print("=" * 90)
+    print("-" * 100)
+
+    # Detailed comparison for multi-sparsity results
+    sweep_data = [d for d in all_data if "sparsities" in d.get("config", {})]
+    if sweep_data:
+        print("\n" + "=" * 100)
+        print("Detailed Sweep Comparison")
+        print("=" * 100)
+
+        for data in sweep_data:
+            filepath = Path(data["_filepath"]).name
+            config = data.get("config", {})
+            results = data.get("results", {})
+            baseline = data.get("baseline", {})
+
+            print(f"\n{filepath}")
+            print(f"Model: {config.get('model', 'N/A')}")
+            print(f"Baseline PPL: {baseline.get('perplexity', 'N/A')}")
+            print()
+
+            # Get all sparsities and methods
+            methods = list(results.keys())
+            sparsities = list(list(results.values())[0].keys())
+
+            # Print header
+            header = f"{'Sparsity':<12}"
+            for m in methods:
+                header += f"{m:>12}"
+            header += f"{'Best':>12}"
+            print(header)
+            print("-" * (12 + 12 * len(methods) + 12))
+
+            # Print each sparsity row
+            for s in sparsities:
+                row = f"{float(s)*100:>10.0f}% "
+                best_ppl = float("inf")
+                best_method = ""
+                for m in methods:
+                    ppl = results[m].get(s, results[m].get(str(s), {})).get("ppl", 0)
+                    row += f"{ppl:>12.2f}"
+                    if ppl < best_ppl:
+                        best_ppl = ppl
+                        best_method = m
+                row += f"{best_method:>12}"
+                print(row)
+
+            # Print wins summary
+            print("-" * (12 + 12 * len(methods) + 12))
+            wins = {m: 0 for m in methods}
+            for s in sparsities:
+                best_ppl = float("inf")
+                best_m = None
+                for m in methods:
+                    ppl = results[m].get(s, results[m].get(str(s), {})).get("ppl", float("inf"))
+                    if ppl < best_ppl:
+                        best_ppl = ppl
+                        best_m = m
+                if best_m:
+                    wins[best_m] += 1
+
+            row = f"{'Wins':<12}"
+            for m in methods:
+                row += f"{wins[m]:>12}"
+            print(row)
+
+    print("\n" + "=" * 100)
 
 
 def main():
