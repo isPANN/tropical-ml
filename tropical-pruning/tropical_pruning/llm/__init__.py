@@ -71,6 +71,15 @@ from tropical_pruning.llm.evaluation import (
     LLMEvaluator,
 )
 
+from tropical_pruning.llm.baselines import (
+    FFNBaselinePruner,
+    MagnitudePruner,
+    ActivationPruner,
+    WandaStylePruner,
+    FLAPStylePruner,
+    get_baseline_pruner,
+)
+
 __all__ = [
     # Model loading
     "load_model_and_tokenizer",
@@ -86,4 +95,11 @@ __all__ = [
     "CalibrationDataset",
     # Evaluation
     "LLMEvaluator",
+    # Baselines
+    "FFNBaselinePruner",
+    "MagnitudePruner",
+    "ActivationPruner",
+    "WandaStylePruner",
+    "FLAPStylePruner",
+    "get_baseline_pruner",
 ]
