@@ -4,7 +4,7 @@
 TROPICAL_GEMM_REPO := https://github.com/TensorBFS/tropical-gemm.git
 TROPICAL_GEMM_DIR := ../tropical-gemm
 PYTHON := uv run python
-MATURIN := maturin
+MATURIN := uv run maturin
 
 .PHONY: help setup setup-cpu setup-cuda deps deps-cpu deps-cuda \
         test run clean clean-deps check-cuda verify
@@ -39,12 +39,15 @@ help:
 # Setup (first time)
 #==============================================================================
 
-setup: clone-gemm deps
-	uv sync
+setup: clone-gemm
+	uv sync --dev
+	$(MAKE) deps
 	@echo ""
 	@echo "Setup complete (CPU)! Run 'make run' to test."
 
-setup-cuda: clone-gemm deps-cuda
+setup-cuda: clone-gemm
+	uv sync --dev
+	$(MAKE) deps-cuda
 	uv sync
 	@echo ""
 	@echo "Setup complete (CUDA)! Run 'make check-cuda' to verify."

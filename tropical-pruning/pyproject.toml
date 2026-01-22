@@ -45,6 +45,7 @@ dev = [
     "black>=23.0",
     "ruff>=0.1.0",
     "mypy>=1.0",
+    "maturin>=1.0",
 ]
 experiment = [
     "wandb>=0.15",
