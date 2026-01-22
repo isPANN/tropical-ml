@@ -304,6 +304,7 @@ def run_pruning_experiment(
     calibration_samples: int = 1000,
     pretrained: bool = True,
     pretrain_epochs: int = 0,
+    load_pretrained_path: Optional[str] = None,
 ) -> Dict:
     """
     Run full pruning experiment.
@@ -348,7 +349,14 @@ def run_pruning_experiment(
         model_fn = get_model_fn(model_name, pretrained)
         base_model = model_fn().to(DEVICE)
 
-        if pretrain_epochs > 0:
+        if load_pretrained_path:
+            # Load pretrained model from file
+            print(f"Loading pretrained model from {load_pretrained_path}...")
+            checkpoint = torch.load(load_pretrained_path)
+            base_model.load_state_dict(checkpoint["model_state_dict"])
+            print(f"  Loaded model trained for {checkpoint.get('epochs', '?')} epochs")
+            print(f"  Original test accuracy: {checkpoint.get('test_accuracy', '?'):.2f}%")
+        elif pretrain_epochs > 0:
             print(f"Pretraining for {pretrain_epochs} epochs...")
             base_model = pretrain_model(
                 base_model, train_loader, val_loader, epochs=pretrain_epochs
@@ -543,7 +551,53 @@ def main():
     parser.add_argument("--output", type=str, default=None,
                        help="Output file path")
 
+    # Model save/load options
+    parser.add_argument("--pretrain-only", action="store_true",
+                       help="Only pretrain model and save, skip pruning experiments")
+    parser.add_argument("--save-model", type=str, default=None,
+                       help="Path to save pretrained model")
+    parser.add_argument("--load-pretrained", type=str, default=None,
+                       help="Path to load pretrained model (skips pretraining)")
+
     args = parser.parse_args()
+
+    # Pretrain-only mode: train and save model, then exit
+    if args.pretrain_only:
+        if args.pretrain_epochs <= 0:
+            print("Error: --pretrain-only requires --pretrain-epochs > 0")
+            return
+
+        print(f"\n{'='*60}")
+        print(f"Pretraining {args.model} on CIFAR-10")
+        print(f"Epochs: {args.pretrain_epochs}")
+        print(f"{'='*60}\n")
+
+        # Get data loaders
+        train_loader, val_loader, test_loader, _ = get_cifar10_loaders()
+
+        # Create model
+        set_seed(42)
+        model_fn = get_model_fn(args.model, pretrained=True)
+        model = model_fn().to(DEVICE)
+
+        # Pretrain
+        print("Starting pretraining...")
+        model = pretrain_model(model, train_loader, val_loader, epochs=args.pretrain_epochs)
+
+        # Evaluate
+        test_acc = evaluate_model(model, test_loader)
+        print(f"\nFinal test accuracy: {test_acc:.2f}%")
+
+        # Save model
+        save_path = args.save_model or (RESULTS_DIR / f"{args.model}_cifar10_pretrained.pth")
+        torch.save({
+            "model_state_dict": model.state_dict(),
+            "model_name": args.model,
+            "epochs": args.pretrain_epochs,
+            "test_accuracy": test_acc,
+        }, save_path)
+        print(f"Model saved to: {save_path}")
+        return
 
     # Set sparsity levels
     if args.full_sweep:
@@ -571,6 +625,7 @@ def main():
             finetune_epochs=args.finetune_epochs,
             calibration_samples=args.calibration_samples,
             pretrain_epochs=args.pretrain_epochs,
+            load_pretrained_path=args.load_pretrained,
         )
         output_name = f"{args.model}_experiment"
 
