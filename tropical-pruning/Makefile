@@ -4,9 +4,9 @@
 TROPICAL_GEMM_REPO := https://github.com/TensorBFS/tropical-gemm.git
 TROPICAL_GEMM_DIR := ../tropical-gemm
 PYTHON := uv run python
-MATURIN := uv run maturin
+MATURIN := maturin
 
-.PHONY: help setup setup-cpu setup-cuda deps deps-cpu deps-cuda \
+.PHONY: help setup setup-cpu setup-cuda deps deps-cpu deps-cuda deps-cuda-direct \
         test run clean clean-deps check-cuda verify
 
 #==============================================================================
@@ -75,9 +75,21 @@ deps: clone-gemm
 # Build and install tropical-gemm with CUDA
 deps-cuda: clone-gemm
 	@echo "Building tropical-gemm (CUDA)..."
+	@echo "Note: If this hangs, try: make deps-cuda-direct"
+	@which maturin >/dev/null 2>&1 || (echo "Installing maturin..." && pip install maturin)
 	cd $(TROPICAL_GEMM_DIR)/crates/tropical-gemm-python && \
-		$(MATURIN) build --release --features cuda && \
+		maturin build --release --features cuda && \
 		$(PYTHON) -m pip install target/wheels/*.whl --force-reinstall
+	@echo "tropical-gemm (CUDA) installed."
+
+# Alternative: Build directly with maturin and system python (bypasses uv)
+deps-cuda-direct: clone-gemm
+	@echo "Building tropical-gemm (CUDA) - direct method (bypasses uv)..."
+	@which maturin >/dev/null 2>&1 || (echo "Installing maturin..." && pip install maturin)
+	@which python3 >/dev/null 2>&1 || (echo "Error: python3 not found" && exit 1)
+	cd $(TROPICAL_GEMM_DIR)/crates/tropical-gemm-python && \
+		maturin build --release --features cuda && \
+		python3 -m pip install target/wheels/*.whl --force-reinstall
 	@echo "tropical-gemm (CUDA) installed."
 
 # Update tropical-gemm to latest
