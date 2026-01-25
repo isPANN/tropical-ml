@@ -22,7 +22,7 @@ from tqdm import tqdm
 
 import tropical_gemm as tg
 
-from .layers import MaxPlusLayer, MinPlusLayer
+from .layers import MaxPlusAffine, MinPlusAffine
 
 
 @dataclass
@@ -73,7 +73,7 @@ class TropicalWinnerCounter:
     tropical operations to identify which inputs contribute to the output.
 
     Example:
-        >>> model = MMPNN([784, 256, 128, 10])
+        >>> model = TropicalNN([784, 256, 128, 10])
         >>> counter = TropicalWinnerCounter(model)
         >>> stats = counter.collect(dataloader)
         >>> print(stats['maxplus_0'].winner_frequency)
@@ -128,14 +128,15 @@ class TropicalWinnerCounter:
         """Register forward hooks on target layers."""
         for name, module in self.model.named_modules():
             if name in self.layer_names:
-                if isinstance(module, (MaxPlusLayer, MinPlusLayer)):
-                    layer_type = "maxplus" if isinstance(module, MaxPlusLayer) else "minplus"
-                    in_features = module.in_features
+                if isinstance(module, (MaxPlusAffine, MinPlusAffine)):
+                    layer_type = "maxplus" if isinstance(module, MaxPlusAffine) else "minplus"
+                    # New architecture uses square matrix (features x features)
+                    num_features = module.features
 
                     # Initialize counter for this layer
                     self._counters[name] = _TropicalLayerCounter(
                         name=name,
-                        num_inputs=in_features,
+                        num_inputs=num_features,
                         layer_type=layer_type,
                         track_margin=self.track_margin,
                         device=self.device,

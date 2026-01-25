@@ -1,275 +1,169 @@
 """
-Tropical Layers: MaxPlusLayer and MinPlusLayer for Min-Max-Plus Neural Networks.
+Tropical Layers: MaxPlus and MinPlus Affine Maps.
 
-These layers implement tropical matrix operations as neural network layers with
-full autograd support. They form the nonlinear component of MMP-NNs.
+These layers replace traditional activation functions (ReLU, etc.) with
+tropical affine transformations that use only additions and max/min operations.
 
-Mathematical formulation:
-- MaxPlusLayer: y_j = max_k(x_k + W_kj) + b_j
-- MinPlusLayer: y_j = min_k(x_k + W_kj) + b_j
+Mathematical foundation:
+- MaxPlusAffine: y[i] = max(max_k(x[k] + W[k,i]), b[i])
+- MinPlusAffine: y[i] = min(min_k(x[k] + W[k,i]), b[i])
+
+Key design choices:
+- Square matrices (features → features): acts as activation replacement
+- LayerNorm before tropical operation: stabilizes sparse gradients
+- Bias as threshold via max/min: true tropical affine transformation
 
 Reference: Luo & Fan 2021 - "Min-Max-Plus Neural Networks"
 """
 
-import math
-from typing import Optional
-
 import torch
 import torch.nn as nn
 
-import tropical_gemm as tg
-from tropical_gemm.pytorch import (
-    TropicalMaxPlusMatmul,
-    TropicalMinPlusMatmul,
-    TropicalMaxPlusMatmulGPU,
-    TropicalMinPlusMatmulGPU,
-    GPU_AVAILABLE,
-    _DLPACK_AVAILABLE,
-)
+# Import tropical-gemm backend
+try:
+    from tropical_gemm.pytorch import (
+        tropical_maxplus_matmul,
+        tropical_minplus_matmul,
+        tropical_maxplus_matmul_gpu,
+        tropical_minplus_matmul_gpu,
+        GPU_AVAILABLE,
+    )
+    TROPICAL_GEMM_AVAILABLE = True
+except ImportError:
+    TROPICAL_GEMM_AVAILABLE = False
+    GPU_AVAILABLE = False
 
 
-class MaxPlusLayer(nn.Module):
+class MaxPlusAffine(nn.Module):
     """
-    Max-Plus tropical layer: y_j = max_k(x_k + W_kj) + b_j
+    MaxPlus affine layer: y[i] = max(max_k(LayerNorm(x)[k] + W[k,i]), b[i])
 
-    Uses tropical-gemm for high-performance SIMD (CPU) or CUDA (GPU) computation.
-    Tropical GEMM: C[i,j] = max_k(A[i,k] + B[k,j])
-
-    This layer provides the nonlinearity in MMP neural networks by taking the
-    maximum over all (input + weight) combinations.
+    This is the tropical analog of an affine transformation in the max-plus semiring.
+    - LayerNorm stabilizes training (sparse gradients from max)
+    - Bias acts as learned threshold via max (tropical addition)
 
     Args:
-        in_features: Size of each input sample.
-        out_features: Size of each output sample.
-        bias: If True, adds a learnable bias. Default: True.
+        features: Number of features (square matrix: features → features)
+        use_gpu: Use GPU acceleration if available
+        use_norm: Apply LayerNorm before tropical operation (recommended)
 
     Shape:
-        - Input: (*, in_features) where * means any number of dimensions
-        - Output: (*, out_features)
-
-    Attributes:
-        weight: Learnable weights of shape (in_features, out_features).
-        bias: Learnable bias of shape (out_features) if bias=True, else None.
+        - Input: (N, features)
+        - Output: (N, features)
 
     Example:
-        >>> layer = MaxPlusLayer(20, 30)
-        >>> x = torch.randn(128, 20)
-        >>> output = layer(x)  # shape: (128, 30)
+        >>> layer = MaxPlusAffine(256)
+        >>> x = torch.randn(32, 256)
+        >>> output = layer(x)  # shape: (32, 256)
     """
 
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        bias: bool = True,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
-    ):
-        factory_kwargs = {"device": device, "dtype": dtype}
+    def __init__(self, features: int, use_gpu: bool = False, use_norm: bool = True):
         super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
+        self.features = features
+        self.use_gpu = use_gpu and GPU_AVAILABLE
+        self.use_norm = use_norm
 
-        # Weight shape: (in_features, out_features) = (K, N) for matmul
-        # This allows C[i,j] = max_k(x[i,k] + weight[k,j])
-        self.weight = nn.Parameter(
-            torch.empty(in_features, out_features, **factory_kwargs)
-        )
+        # LayerNorm before tropical operation
+        if use_norm:
+            self.norm = nn.LayerNorm(features)
 
-        if bias:
-            self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
-        else:
-            self.register_parameter("bias", None)
-
-        self.reset_parameters()
-
-    def reset_parameters(self) -> None:
-        """Initialize weights using tropical-aware initialization.
-
-        For tropical layers, we use a smaller initialization scale since
-        the operation is max(x + w) instead of sum(x * w).
-        """
-        # Initialize with small values centered around 0
-        # This ensures all inputs have a chance to "win" initially
-        nn.init.uniform_(self.weight, -0.1, 0.1)
-        if self.bias is not None:
-            nn.init.zeros_(self.bias)
+        # Weight matrix (square) - initialized with spread for diverse winners
+        self.weight = nn.Parameter(torch.randn(features, features) * 0.5)
+        # Bias as threshold (combined via max)
+        self.bias = nn.Parameter(torch.zeros(features))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass: compute tropical max-plus matmul.
+        if self.use_norm:
+            x = self.norm(x)
 
-        Args:
-            x: Input tensor of shape (*, in_features)
-
-        Returns:
-            Output tensor of shape (*, out_features)
-        """
-        # Handle multi-dimensional inputs
-        original_shape = x.shape[:-1]
-        x_flat = x.reshape(-1, self.in_features)
-
-        # Choose backend based on device and availability
-        if x.is_cuda and GPU_AVAILABLE and _DLPACK_AVAILABLE:
-            output = TropicalMaxPlusMatmulGPU.apply(
-                x_flat.contiguous(), self.weight.contiguous()
-            )
+        if self.use_gpu:
+            out = tropical_maxplus_matmul_gpu(x, self.weight)
         else:
-            output = TropicalMaxPlusMatmul.apply(
-                x_flat.contiguous(), self.weight.contiguous()
-            )
+            out = tropical_maxplus_matmul(x, self.weight)
 
-        # Reshape back to original batch dimensions
-        output = output.reshape(*original_shape, self.out_features)
-
-        if self.bias is not None:
-            output = output + self.bias
-
-        return output
+        # Tropical affine: y = max(out, bias)
+        return torch.maximum(out, self.bias)
 
     def extra_repr(self) -> str:
-        return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}"
+        return f"features={self.features}, gpu={self.use_gpu}, norm={self.use_norm}"
 
 
-class MinPlusLayer(nn.Module):
+class MinPlusAffine(nn.Module):
     """
-    Min-Plus tropical layer: y_j = min_k(x_k + W_kj) + b_j
+    MinPlus affine layer: y[i] = min(min_k(LayerNorm(x)[k] + W[k,i]), b[i])
 
-    Uses tropical-gemm for optimized computation.
-    Tropical GEMM: C[i,j] = min_k(A[i,k] + B[k,j])
-
-    This layer complements MaxPlusLayer for full expressiveness in MMP networks.
-    Together, max-plus and min-plus layers achieve universal approximation.
+    Complement to MaxPlusAffine. Together they provide universal approximation.
+    - MaxPlus finds "longest paths" (max over sums)
+    - MinPlus finds "shortest paths" (min over sums)
 
     Args:
-        in_features: Size of each input sample.
-        out_features: Size of each output sample.
-        bias: If True, adds a learnable bias. Default: True.
+        features: Number of features (square matrix: features → features)
+        use_gpu: Use GPU acceleration if available
+        use_norm: Apply LayerNorm before tropical operation (recommended)
 
     Shape:
-        - Input: (*, in_features) where * means any number of dimensions
-        - Output: (*, out_features)
-
-    Attributes:
-        weight: Learnable weights of shape (in_features, out_features).
-        bias: Learnable bias of shape (out_features) if bias=True, else None.
+        - Input: (N, features)
+        - Output: (N, features)
 
     Example:
-        >>> layer = MinPlusLayer(20, 30)
-        >>> x = torch.randn(128, 20)
-        >>> output = layer(x)  # shape: (128, 30)
+        >>> layer = MinPlusAffine(256)
+        >>> x = torch.randn(32, 256)
+        >>> output = layer(x)  # shape: (32, 256)
     """
 
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        bias: bool = True,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
-    ):
-        factory_kwargs = {"device": device, "dtype": dtype}
+    def __init__(self, features: int, use_gpu: bool = False, use_norm: bool = True):
         super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
+        self.features = features
+        self.use_gpu = use_gpu and GPU_AVAILABLE
+        self.use_norm = use_norm
 
-        # Weight shape: (in_features, out_features) = (K, N) for matmul
-        self.weight = nn.Parameter(
-            torch.empty(in_features, out_features, **factory_kwargs)
-        )
+        if use_norm:
+            self.norm = nn.LayerNorm(features)
 
-        if bias:
-            self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
-        else:
-            self.register_parameter("bias", None)
-
-        self.reset_parameters()
-
-    def reset_parameters(self) -> None:
-        """Initialize weights using tropical-aware initialization."""
-        nn.init.uniform_(self.weight, -0.1, 0.1)
-        if self.bias is not None:
-            nn.init.zeros_(self.bias)
+        self.weight = nn.Parameter(torch.randn(features, features) * 0.5)
+        self.bias = nn.Parameter(torch.zeros(features))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass: compute tropical min-plus matmul.
+        if self.use_norm:
+            x = self.norm(x)
 
-        Args:
-            x: Input tensor of shape (*, in_features)
-
-        Returns:
-            Output tensor of shape (*, out_features)
-        """
-        # Handle multi-dimensional inputs
-        original_shape = x.shape[:-1]
-        x_flat = x.reshape(-1, self.in_features)
-
-        # Choose backend based on device and availability
-        if x.is_cuda and GPU_AVAILABLE and _DLPACK_AVAILABLE:
-            output = TropicalMinPlusMatmulGPU.apply(
-                x_flat.contiguous(), self.weight.contiguous()
-            )
+        if self.use_gpu:
+            out = tropical_minplus_matmul_gpu(x, self.weight)
         else:
-            output = TropicalMinPlusMatmul.apply(
-                x_flat.contiguous(), self.weight.contiguous()
-            )
+            out = tropical_minplus_matmul(x, self.weight)
 
-        # Reshape back to original batch dimensions
-        output = output.reshape(*original_shape, self.out_features)
-
-        if self.bias is not None:
-            output = output + self.bias
-
-        return output
+        # Tropical affine: y = min(out, bias)
+        return torch.minimum(out, self.bias)
 
     def extra_repr(self) -> str:
-        return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}"
+        return f"features={self.features}, gpu={self.use_gpu}, norm={self.use_norm}"
+
+
+# Aliases for backward compatibility
+MaxPlusLayer = MaxPlusAffine
+MinPlusLayer = MinPlusAffine
 
 
 class TropicalReLU(nn.Module):
     """
-    ReLU as a special case of MaxPlusLayer.
+    ReLU as a special case of MaxPlus.
 
-    ReLU(x) = max(x, 0) can be viewed as a tropical max-plus operation
-    with fixed weights: W = [[0], [-inf]]
-
-    This is primarily for demonstration and conversion purposes.
-    For training, use MaxPlusLayer with learnable weights.
-
-    Shape:
-        - Input: (*, features)
-        - Output: (*, features)
-
-    Example:
-        >>> relu = TropicalReLU()
-        >>> x = torch.randn(128, 64)
-        >>> output = relu(x)  # Same as torch.relu(x)
+    ReLU(x) = max(x, 0) is equivalent to tropical addition with zero.
+    This is mainly for demonstration/comparison.
     """
 
     def __init__(self):
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply element-wise max(x, 0) using tropical interpretation."""
         return torch.relu(x)
 
 
 class TropicalLeakyReLU(nn.Module):
     """
-    LeakyReLU as a max-affine function with 2 pieces.
+    LeakyReLU as a max of two linear functions.
 
-    LeakyReLU(x, α) = max(x, αx)
-
-    This can be implemented as a MaxPlusLayer with specific structure,
-    but for efficiency we use the direct formula.
-
-    Args:
-        negative_slope: Slope for negative inputs. Default: 0.01
-
-    Shape:
-        - Input: (*, features)
-        - Output: (*, features)
+    LeakyReLU(x) = max(x, alpha*x) = max-affine with 2 pieces.
     """
 
     def __init__(self, negative_slope: float = 0.01):
@@ -277,13 +171,16 @@ class TropicalLeakyReLU(nn.Module):
         self.negative_slope = negative_slope
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply element-wise max(x, αx)."""
         return torch.nn.functional.leaky_relu(x, self.negative_slope)
 
 
 __all__ = [
-    "MaxPlusLayer",
-    "MinPlusLayer",
+    "MaxPlusAffine",
+    "MinPlusAffine",
+    "MaxPlusLayer",  # Alias
+    "MinPlusLayer",  # Alias
     "TropicalReLU",
     "TropicalLeakyReLU",
+    "TROPICAL_GEMM_AVAILABLE",
+    "GPU_AVAILABLE",
 ]

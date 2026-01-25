@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-Train MMP Neural Networks on CIFAR-10.
+Train Tropical Neural Networks on CIFAR-10.
 
-This script trains convolutional MMP networks on CIFAR-10 with
-proper data augmentation and training techniques.
+Conv backbone + tropical classifier head.
 
 Usage:
-    python train_cifar10.py --model mmp --epochs 200
-    python train_cifar10.py --model baseline --epochs 200  # ReLU baseline
-    python train_cifar10.py --model resnet_mmp --epochs 200  # ResNet with MMP
+    python train_cifar10.py --model tropical --epochs 200
+    python train_cifar10.py --model baseline --epochs 200
 
 Requirements:
     pip install tropical-activation torchvision
@@ -186,8 +184,8 @@ def evaluate(model, loader, criterion, device):
 
 def main():
     parser = argparse.ArgumentParser(description="Train MMP-NN on CIFAR-10")
-    parser.add_argument("--model", type=str, default="mmp",
-                       choices=["mmp", "baseline", "resnet_mmp", "resnet_baseline"],
+    parser.add_argument("--model", type=str, default="tropical",
+                       choices=["tropical", "baseline", "resnet_tropical", "resnet_baseline"],
                        help="Model architecture")
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=128)
@@ -225,7 +223,7 @@ def main():
     model.to(device)
 
     # Initialize tropical weights
-    if "mmp" in args.model:
+    if "tropical" in args.model:
         tropical_weight_init(model, init_scale=0.1)
 
     # Model info

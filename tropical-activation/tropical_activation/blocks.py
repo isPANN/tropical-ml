@@ -1,14 +1,11 @@
 """
-MMP Blocks: Building blocks for Min-Max-Plus Neural Networks.
+Tropical Blocks: Building blocks for Tropical Neural Networks.
 
-MMPBlock combines Linear, MaxPlus, and MinPlus layers into a single unit.
-This is the standard building block of MMP Neural Networks.
+TropicalBlock combines Linear with MaxPlusAffine and MinPlusAffine layers.
+The Linear layer handles dimension changes, tropical layers act as activations.
 
 Architecture:
-    Linear → MaxPlus → MinPlus
-
-The linear layer provides the multiplicative transform, while MaxPlus/MinPlus
-layers provide the nonlinearity through tropical operations.
+    Linear(in → out) → MaxPlusAffine(out) → MinPlusAffine(out)
 
 Reference: Luo & Fan 2021 - "Min-Max-Plus Neural Networks"
 """
@@ -18,263 +15,190 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from .layers import MaxPlusLayer, MinPlusLayer
+from .layers import MaxPlusAffine, MinPlusAffine
 
 
-class MMPBlock(nn.Module):
+class TropicalBlock(nn.Module):
     """
-    Min-Max-Plus Block: Linear → MaxPlus → MinPlus
+    Tropical Block: Linear → MaxPlusAffine → MinPlusAffine
 
-    The standard building block of MMP Neural Networks.
-    Linear provides multiplicative transform, MaxPlus/MinPlus provide nonlinearity.
+    Linear handles dimension change, tropical layers provide nonlinearity.
+    This is the recommended building block for tropical networks.
 
     Args:
         in_features: Size of each input sample.
-        hidden_features: Size of the hidden layer (MaxPlus output).
-            If None, defaults to in_features.
         out_features: Size of each output sample.
-            If None, defaults to in_features.
-        linear_bias: Whether the linear layer has a bias. Default: True.
-        tropical_bias: Whether tropical layers have biases. Default: True.
+        use_gpu: Use GPU acceleration for tropical layers.
         dropout: Dropout probability. Default: 0.0.
 
     Shape:
-        - Input: (*, in_features)
-        - Output: (*, out_features)
+        - Input: (N, in_features)
+        - Output: (N, out_features)
 
     Example:
-        >>> block = MMPBlock(64, 128, 64)
-        >>> x = torch.randn(32, 64)
-        >>> output = block(x)  # shape: (32, 64)
+        >>> block = TropicalBlock(784, 256)
+        >>> x = torch.randn(32, 784)
+        >>> output = block(x)  # shape: (32, 256)
     """
 
     def __init__(
         self,
         in_features: int,
-        hidden_features: Optional[int] = None,
-        out_features: Optional[int] = None,
-        linear_bias: bool = True,
-        tropical_bias: bool = True,
+        out_features: int,
+        use_gpu: bool = False,
         dropout: float = 0.0,
     ):
         super().__init__()
-
-        hidden_features = hidden_features or in_features
-        out_features = out_features or in_features
-
         self.in_features = in_features
-        self.hidden_features = hidden_features
         self.out_features = out_features
 
-        # Standard linear layer (multiplicative)
-        self.linear = nn.Linear(in_features, hidden_features, bias=linear_bias)
+        # Linear handles dimension change
+        self.linear = nn.Linear(in_features, out_features)
 
-        # Tropical nonlinearity layers
-        self.maxplus = MaxPlusLayer(hidden_features, hidden_features, bias=tropical_bias)
-        self.minplus = MinPlusLayer(hidden_features, out_features, bias=tropical_bias)
+        # Tropical layers act as activation (square matrices)
+        self.maxplus = MaxPlusAffine(out_features, use_gpu=use_gpu)
+        self.minplus = MinPlusAffine(out_features, use_gpu=use_gpu)
 
         # Optional dropout
         self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass through the MMP block.
-
-        Args:
-            x: Input tensor of shape (*, in_features)
-
-        Returns:
-            Output tensor of shape (*, out_features)
-        """
-        x = self.linear(x)    # Standard multiplication: W @ x + b
-        x = self.maxplus(x)   # Tropical nonlinearity 1: max_k(x_k + w_k)
-        x = self.minplus(x)   # Tropical nonlinearity 2: min_k(x_k + w_k)
+        x = self.linear(x)     # Dimension change: W @ x + b
+        x = self.maxplus(x)    # Tropical activation: max(max_k(x + W), b)
+        x = self.minplus(x)    # Tropical activation: min(min_k(x + W), b)
         x = self.dropout(x)
         return x
 
 
-class ResidualMMPBlock(nn.Module):
-    """
-    Residual MMP Block: MMPBlock with skip connection.
+# Alias for backward compatibility
+MMPBlock = TropicalBlock
 
-    Similar to residual connections in standard networks, this adds
-    a skip connection around the MMP block for better gradient flow.
+
+class ResidualTropicalBlock(nn.Module):
+    """
+    Residual Tropical Block: TropicalBlock with skip connection.
 
     Args:
         features: Size of input/output features.
-        hidden_features: Size of the hidden layer. If None, defaults to features * 4.
+        use_gpu: Use GPU acceleration for tropical layers.
         dropout: Dropout probability. Default: 0.0.
-        scale_init: Initial scale for the residual. Default: 1.0.
 
     Shape:
-        - Input: (*, features)
-        - Output: (*, features)
-
-    Example:
-        >>> block = ResidualMMPBlock(64, 256)
-        >>> x = torch.randn(32, 64)
-        >>> output = block(x)  # shape: (32, 64)
+        - Input: (N, features)
+        - Output: (N, features)
     """
 
     def __init__(
         self,
         features: int,
-        hidden_features: Optional[int] = None,
+        use_gpu: bool = False,
         dropout: float = 0.0,
-        scale_init: float = 1.0,
     ):
         super().__init__()
-
-        hidden_features = hidden_features or features * 4
-
-        self.block = MMPBlock(
-            in_features=features,
-            hidden_features=hidden_features,
-            out_features=features,
-            dropout=dropout,
-        )
-
-        # Learnable residual scale (for training stability)
-        self.scale = nn.Parameter(torch.tensor(scale_init))
+        self.block = TropicalBlock(features, features, use_gpu=use_gpu, dropout=dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass with residual connection."""
-        return x + self.scale * self.block(x)
+        return x + self.block(x)
+
+
+# Alias for backward compatibility
+ResidualMMPBlock = ResidualTropicalBlock
 
 
 class MaxPlusBlock(nn.Module):
     """
-    Pure MaxPlus Block: Linear → MaxPlus
+    MaxPlus Block: Linear → MaxPlusAffine
 
-    A simpler block using only max-plus nonlinearity (no min-plus).
-    Useful for experiments or when min-plus isn't needed.
+    Simpler block with only MaxPlus activation.
 
     Args:
         in_features: Size of each input sample.
         out_features: Size of each output sample.
-        linear_bias: Whether the linear layer has a bias. Default: True.
-        tropical_bias: Whether the MaxPlus layer has a bias. Default: True.
+        use_gpu: Use GPU acceleration.
 
     Shape:
-        - Input: (*, in_features)
-        - Output: (*, out_features)
+        - Input: (N, in_features)
+        - Output: (N, out_features)
     """
 
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        linear_bias: bool = True,
-        tropical_bias: bool = True,
-    ):
+    def __init__(self, in_features: int, out_features: int, use_gpu: bool = False):
         super().__init__()
-        self.linear = nn.Linear(in_features, out_features, bias=linear_bias)
-        self.maxplus = MaxPlusLayer(out_features, out_features, bias=tropical_bias)
+        self.linear = nn.Linear(in_features, out_features)
+        self.maxplus = MaxPlusAffine(out_features, use_gpu=use_gpu)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.linear(x)
-        x = self.maxplus(x)
-        return x
+        return self.maxplus(self.linear(x))
 
 
 class MinPlusBlock(nn.Module):
     """
-    Pure MinPlus Block: Linear → MinPlus
+    MinPlus Block: Linear → MinPlusAffine
 
-    A simpler block using only min-plus nonlinearity (no max-plus).
+    Simpler block with only MinPlus activation.
 
     Args:
         in_features: Size of each input sample.
         out_features: Size of each output sample.
-        linear_bias: Whether the linear layer has a bias. Default: True.
-        tropical_bias: Whether the MinPlus layer has a bias. Default: True.
+        use_gpu: Use GPU acceleration.
 
     Shape:
-        - Input: (*, in_features)
-        - Output: (*, out_features)
+        - Input: (N, in_features)
+        - Output: (N, out_features)
     """
 
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        linear_bias: bool = True,
-        tropical_bias: bool = True,
-    ):
+    def __init__(self, in_features: int, out_features: int, use_gpu: bool = False):
         super().__init__()
-        self.linear = nn.Linear(in_features, out_features, bias=linear_bias)
-        self.minplus = MinPlusLayer(out_features, out_features, bias=tropical_bias)
+        self.linear = nn.Linear(in_features, out_features)
+        self.minplus = MinPlusAffine(out_features, use_gpu=use_gpu)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.linear(x)
-        x = self.minplus(x)
-        return x
+        return self.minplus(self.linear(x))
 
 
 class TropicalMLP(nn.Module):
     """
-    Tropical MLP: Replaces standard MLP's activations with tropical layers.
+    Tropical MLP: Multiple TropicalBlocks stacked.
 
-    Standard MLP: Linear → ReLU → Linear → ReLU → ...
-    Tropical MLP: Linear → MaxPlus → Linear → MinPlus → ...
-
-    Alternates MaxPlus and MinPlus for full expressiveness.
+    Architecture:
+        Linear → MaxPlus → MinPlus → Linear → MaxPlus → MinPlus → ... → Linear
 
     Args:
-        in_features: Size of each input sample.
-        hidden_features: Size of the hidden layer.
-        out_features: Size of each output sample.
-        num_layers: Number of linear layers. Default: 2.
+        layer_sizes: List of layer sizes [input, hidden1, hidden2, ..., output]
+        use_gpu: Use GPU acceleration for tropical layers.
         dropout: Dropout probability. Default: 0.0.
 
     Shape:
-        - Input: (*, in_features)
-        - Output: (*, out_features)
+        - Input: (N, layer_sizes[0])
+        - Output: (N, layer_sizes[-1])
 
     Example:
-        >>> mlp = TropicalMLP(64, 256, 10, num_layers=3)
-        >>> x = torch.randn(32, 64)
+        >>> mlp = TropicalMLP([784, 256, 128, 10])
+        >>> x = torch.randn(32, 784)
         >>> output = mlp(x)  # shape: (32, 10)
     """
 
     def __init__(
         self,
-        in_features: int,
-        hidden_features: int,
-        out_features: int,
-        num_layers: int = 2,
+        layer_sizes: list,
+        use_gpu: bool = False,
         dropout: float = 0.0,
     ):
         super().__init__()
+        assert len(layer_sizes) >= 2, "Need at least input and output sizes"
 
-        self.num_layers = num_layers
+        self.layer_sizes = layer_sizes
         layers = []
 
-        for i in range(num_layers):
-            # Determine layer sizes
-            if i == 0:
-                in_dim = in_features
+        for i in range(len(layer_sizes) - 1):
+            in_dim = layer_sizes[i]
+            out_dim = layer_sizes[i + 1]
+
+            if i < len(layer_sizes) - 2:
+                # Hidden layers: Linear → MaxPlus → MinPlus
+                layers.append(TropicalBlock(in_dim, out_dim, use_gpu=use_gpu, dropout=dropout))
             else:
-                in_dim = hidden_features
-
-            if i == num_layers - 1:
-                out_dim = out_features
-            else:
-                out_dim = hidden_features
-
-            # Add linear layer
-            layers.append(nn.Linear(in_dim, out_dim))
-
-            # Add tropical nonlinearity (except for last layer)
-            if i < num_layers - 1:
-                # Alternate between MaxPlus and MinPlus
-                if i % 2 == 0:
-                    layers.append(MaxPlusLayer(out_dim, out_dim))
-                else:
-                    layers.append(MinPlusLayer(out_dim, out_dim))
-
-                if dropout > 0.0:
-                    layers.append(nn.Dropout(dropout))
+                # Output layer: just Linear (no tropical activation)
+                layers.append(nn.Linear(in_dim, out_dim))
 
         self.layers = nn.Sequential(*layers)
 
@@ -283,9 +207,12 @@ class TropicalMLP(nn.Module):
 
 
 __all__ = [
-    "MMPBlock",
-    "ResidualMMPBlock",
+    "TropicalBlock",
+    "ResidualTropicalBlock",
     "MaxPlusBlock",
     "MinPlusBlock",
     "TropicalMLP",
+    # Aliases for backward compatibility
+    "MMPBlock",
+    "ResidualMMPBlock",
 ]

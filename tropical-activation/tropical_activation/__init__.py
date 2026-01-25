@@ -1,64 +1,74 @@
 """
-Tropical Activation: Min-Max-Plus Neural Networks.
+Tropical Activation: Neural Networks with Tropical Algebra.
 
-This package implements tropical algebra-based neural networks where
-activation functions are replaced with tropical layers (MaxPlus/MinPlus).
+Replaces traditional activation functions with tropical affine layers.
+Uses only additions and max/min operations instead of multiplications.
 
 Key components:
-- MaxPlusLayer, MinPlusLayer: Core tropical layers with autograd support
-- MMPBlock: Building block combining Linear → MaxPlus → MinPlus
-- MMPNN: Full Min-Max-Plus Neural Network
-- Training utilities, conversion functions, and analysis tools
+- MaxPlusAffine, MinPlusAffine: Core tropical layers (square, with LayerNorm)
+- TropicalBlock: Linear → MaxPlus → MinPlus (building block)
+- TropicalNN: Full tropical neural network
+
+Architecture:
+    Linear(in→out) → MaxPlusAffine(out) → MinPlusAffine(out) → Linear → ...
 
 Mathematical foundation:
-- MaxPlus: y_j = max_k(x_k + W_kj) + b_j
-- MinPlus: y_j = min_k(x_k + W_kj) + b_j
+- MaxPlusAffine: y[i] = max(max_k(LayerNorm(x)[k] + W[k,i]), b[i])
+- MinPlusAffine: y[i] = min(min_k(LayerNorm(x)[k] + W[k,i]), b[i])
 
 Reference: Luo & Fan 2021 - "Min-Max-Plus Neural Networks"
 https://arxiv.org/abs/2102.06358
 
 Example:
     >>> import torch
-    >>> from tropical_activation import MMPNN, MaxPlusLayer
+    >>> from tropical_activation import TropicalNN, MaxPlusAffine
     >>>
-    >>> # Create an MMP classifier
-    >>> model = MMPNN([784, 256, 128, 10])
-    >>>
-    >>> # Forward pass
+    >>> # Create a tropical classifier
+    >>> model = TropicalNN([784, 256, 128, 10])
     >>> x = torch.randn(32, 784)
     >>> logits = model(x)
     >>>
     >>> # Or use individual layers
-    >>> layer = MaxPlusLayer(64, 128)
-    >>> output = layer(torch.randn(32, 64))
+    >>> layer = MaxPlusAffine(256)  # square: 256 → 256
+    >>> output = layer(torch.randn(32, 256))
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # Core layers
 from .layers import (
-    MaxPlusLayer,
-    MinPlusLayer,
+    MaxPlusAffine,
+    MinPlusAffine,
+    MaxPlusLayer,  # Alias
+    MinPlusLayer,  # Alias
     TropicalReLU,
     TropicalLeakyReLU,
+    TROPICAL_GEMM_AVAILABLE,
+    GPU_AVAILABLE,
 )
 
 # Building blocks
 from .blocks import (
-    MMPBlock,
-    ResidualMMPBlock,
+    TropicalBlock,
+    ResidualTropicalBlock,
     MaxPlusBlock,
     MinPlusBlock,
     TropicalMLP,
+    MMPBlock,  # Alias
+    ResidualMMPBlock,  # Alias
 )
 
 # Complete models
 from .models import (
-    MMPNN,
-    MMPClassifier,
+    TropicalNN,
+    TropicalClassifier,
     PureTropicalNN,
-    MMPAutoencoder,
-    create_mmpnn,
+    TropicalAutoencoder,
+    create_tropical_nn,
+    MMPNN,  # Alias
+    MMPClassifier,  # Alias
+    MMPAutoencoder,  # Alias
+    create_mmpnn,  # Alias
 )
 
 # Training utilities
@@ -114,21 +124,31 @@ from .vision import (
 __all__ = [
     # Version
     "__version__",
-    # Layers
+    # Layers (new names)
+    "MaxPlusAffine",
+    "MinPlusAffine",
     "MaxPlusLayer",
     "MinPlusLayer",
     "TropicalReLU",
     "TropicalLeakyReLU",
-    # Blocks
-    "MMPBlock",
-    "ResidualMMPBlock",
+    "TROPICAL_GEMM_AVAILABLE",
+    "GPU_AVAILABLE",
+    # Blocks (new names)
+    "TropicalBlock",
+    "ResidualTropicalBlock",
     "MaxPlusBlock",
     "MinPlusBlock",
     "TropicalMLP",
-    # Models
+    "MMPBlock",
+    "ResidualMMPBlock",
+    # Models (new names)
+    "TropicalNN",
+    "TropicalClassifier",
+    "PureTropicalNN",
+    "TropicalAutoencoder",
+    "create_tropical_nn",
     "MMPNN",
     "MMPClassifier",
-    "PureTropicalNN",
     "MMPAutoencoder",
     "create_mmpnn",
     # Training

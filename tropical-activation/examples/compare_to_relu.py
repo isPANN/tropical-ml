@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Compare MMP Networks to Standard ReLU Networks.
+Compare Tropical Networks to Standard ReLU Networks.
 
-This example trains both an MMP-NN and a standard ReLU network on MNIST
-and compares their performance, parameter counts, and operation counts.
+Trains both a tropical network and a standard ReLU network on MNIST
+and compares their performance and operation counts.
 
 Usage:
-    python compare_to_relu.py [--epochs 10] [--batch-size 128]
+    python compare_to_relu.py [--epochs 15]
 
 Requirements:
-    pip install tropical-activation[experiment]
+    pip install tropical-activation torchvision
 """
 
 import argparse
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -20,22 +21,18 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
-from tropical_activation import MMPNN
-from tropical_activation.training import (
-    tropical_weight_init,
-    train_epoch,
-    evaluate,
-    count_parameters,
-    count_operations,
-)
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from tropical_activation import TropicalNN
+from tropical_activation.training import tropical_weight_init, count_parameters
 
 
-class StandardMLP(nn.Module):
+class BaselineMLP(nn.Module):
     """Standard MLP with ReLU activations for comparison."""
 
     def __init__(self, layer_sizes: list, dropout: float = 0.0):
         super().__init__()
-
         layers = []
         for i in range(len(layer_sizes) - 1):
             layers.append(nn.Linear(layer_sizes[i], layer_sizes[i + 1]))
@@ -43,11 +40,10 @@ class StandardMLP(nn.Module):
                 layers.append(nn.ReLU())
                 if dropout > 0:
                     layers.append(nn.Dropout(dropout))
-
         self.layers = nn.Sequential(*layers)
 
     def forward(self, x):
-        return self.layers(x)
+        return self.layers(x.view(x.size(0), -1))
 
 
 def get_mnist_dataloaders(batch_size: int, data_dir: str = "./data"):
@@ -55,7 +51,6 @@ def get_mnist_dataloaders(batch_size: int, data_dir: str = "./data"):
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,)),
-        transforms.Lambda(lambda x: x.view(-1)),
     ])
 
     train_dataset = datasets.MNIST(
@@ -75,152 +70,165 @@ def get_mnist_dataloaders(batch_size: int, data_dir: str = "./data"):
     return train_loader, test_loader
 
 
-def train_model(model, train_loader, test_loader, epochs, lr, device):
-    """Train a model and return final metrics."""
+def train_epoch(model, loader, optimizer, criterion):
+    """Train for one epoch."""
+    model.train()
+    total_loss = 0
+    correct = 0
+    total = 0
+
+    for data, target in loader:
+        optimizer.zero_grad()
+        output = model(data.view(data.size(0), -1))
+        loss = criterion(output, target)
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+        correct += output.argmax(1).eq(target).sum().item()
+        total += target.size(0)
+
+    return total_loss / len(loader), 100.0 * correct / total
+
+
+@torch.no_grad()
+def evaluate(model, loader, criterion):
+    """Evaluate the model."""
+    model.eval()
+    total_loss = 0
+    correct = 0
+    total = 0
+
+    for data, target in loader:
+        output = model(data.view(data.size(0), -1))
+        total_loss += criterion(output, target).item()
+        correct += output.argmax(1).eq(target).sum().item()
+        total += target.size(0)
+
+    return total_loss / len(loader), 100.0 * correct / total
+
+
+def train_model(model, name, train_loader, test_loader, epochs, lr):
+    """Train a model and return best accuracy."""
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
-
-    model.to(device)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     best_acc = 0.0
-    for epoch in range(1, epochs + 1):
-        train_metrics = train_epoch(
-            model, train_loader, optimizer, criterion, device
-        )
-        test_metrics = evaluate(model, test_loader, criterion, device)
 
-        if test_metrics['accuracy'] > best_acc:
-            best_acc = test_metrics['accuracy']
+    for epoch in range(1, epochs + 1):
+        train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion)
+        test_loss, test_acc = evaluate(model, test_loader, criterion)
+        scheduler.step()
+
+        if test_acc > best_acc:
+            best_acc = test_acc
 
         if epoch % 5 == 0 or epoch == epochs:
-            print(f"  Epoch {epoch:2d}: "
-                  f"Train Acc: {train_metrics['accuracy']:.2f}%, "
-                  f"Test Acc: {test_metrics['accuracy']:.2f}%")
+            print(f"  Epoch {epoch:2d}: Train={train_acc:.1f}%, Test={test_acc:.1f}%")
 
-    return best_acc, test_metrics
+    return best_acc
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compare MMP-NN to ReLU network")
-    parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
+    parser = argparse.ArgumentParser(description="Compare Tropical NN to ReLU")
+    parser.add_argument("--epochs", type=int, default=15, help="Number of epochs")
     parser.add_argument("--batch-size", type=int, default=128, help="Batch size")
     parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
     parser.add_argument("--data-dir", type=str, default="./data",
                        help="Directory for MNIST data")
     args = parser.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    print("=" * 60)
+    print("COMPARISON: Tropical NN vs Standard ReLU Network")
+    print("=" * 60)
 
     # Load data
-    print("Loading MNIST dataset...")
+    print("\nLoading MNIST dataset...")
     train_loader, test_loader = get_mnist_dataloaders(args.batch_size, args.data_dir)
 
     # Define architecture
     layer_sizes = [784, 256, 128, 10]
 
-    print("\n" + "=" * 60)
-    print("COMPARISON: MMP-NN vs Standard ReLU Network")
-    print("=" * 60)
-
     # --- Standard ReLU Network ---
-    print("\n1. Standard ReLU Network")
+    print("\n" + "-" * 40)
+    print("1. Standard ReLU Network")
     print("-" * 40)
 
-    relu_model = StandardMLP(layer_sizes)
-
-    relu_params = sum(p.numel() for p in relu_model.parameters())
-    print(f"Parameters: {relu_params:,}")
+    baseline = BaselineMLP(layer_sizes)
+    baseline_params = sum(p.numel() for p in baseline.parameters())
+    print(f"Parameters: {baseline_params:,}")
 
     print("Training...")
-    relu_best_acc, relu_final = train_model(
-        relu_model, train_loader, test_loader, args.epochs, args.lr, device
-    )
+    baseline_acc = train_model(baseline, "ReLU", train_loader, test_loader, args.epochs, args.lr)
 
-    # --- MMP Neural Network (with Linear layers) ---
-    print("\n2. MMP Neural Network (Hybrid)")
+    # --- Tropical Neural Network ---
+    print("\n" + "-" * 40)
+    print("2. Tropical Neural Network")
     print("-" * 40)
 
-    mmp_model = MMPNN(layer_sizes, use_linear=True)
-    tropical_weight_init(mmp_model)
+    tropical = TropicalNN(layer_sizes)
+    tropical_weight_init(tropical, init_scale=0.1)
 
-    mmp_param_counts = count_parameters(mmp_model)
-    print(f"Parameters: {mmp_param_counts['total']:,} "
-          f"(Tropical: {mmp_param_counts['tropical']:,}, "
-          f"Linear: {mmp_param_counts['linear']:,})")
-
-    print("Training...")
-    mmp_best_acc, mmp_final = train_model(
-        mmp_model, train_loader, test_loader, args.epochs, args.lr, device
-    )
-
-    # --- Pure Tropical Network ---
-    print("\n3. Pure Tropical Network (No Linear)")
-    print("-" * 40)
-
-    pure_tropical = MMPNN(layer_sizes, use_linear=False)
-    tropical_weight_init(pure_tropical)
-
-    pure_param_counts = count_parameters(pure_tropical)
-    print(f"Parameters: {pure_param_counts['total']:,} "
-          f"(All tropical)")
+    tropical_params = count_parameters(tropical)
+    print(f"Parameters: {tropical_params['total']:,}")
+    print(f"  Tropical: {tropical_params['tropical']:,}")
+    print(f"  Linear: {tropical_params['linear']:,}")
 
     print("Training...")
-    pure_best_acc, pure_final = train_model(
-        pure_tropical, train_loader, test_loader, args.epochs, args.lr, device
-    )
+    tropical_acc = train_model(tropical, "Tropical", train_loader, test_loader, args.epochs, args.lr)
 
     # --- Summary ---
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
 
-    print("\nAccuracy Comparison:")
-    print(f"  Standard ReLU:     {relu_best_acc:.2f}%")
-    print(f"  MMP-NN (Hybrid):   {mmp_best_acc:.2f}%")
-    print(f"  Pure Tropical:     {pure_best_acc:.2f}%")
+    print("\nAccuracy:")
+    print(f"  Standard ReLU:  {baseline_acc:.1f}%")
+    print(f"  Tropical NN:    {tropical_acc:.1f}%")
 
-    print("\nParameter Counts:")
-    print(f"  Standard ReLU:     {relu_params:,}")
-    print(f"  MMP-NN (Hybrid):   {mmp_param_counts['total']:,}")
-    print(f"  Pure Tropical:     {pure_param_counts['total']:,}")
+    print("\nParameters:")
+    print(f"  Standard ReLU:  {baseline_params:,}")
+    print(f"  Tropical NN:    {tropical_params['total']:,}")
 
-    print("\nOperation Counts (per sample):")
+    # Operation analysis
+    print("\nOperation Analysis (per sample):")
 
-    # For ReLU model, we estimate operations
-    relu_ops = {"multiplications": 0, "additions": 0, "comparisons": 0}
+    # ReLU network: multiplications in matrix multiply
+    relu_muls = 0
+    relu_adds = 0
     for i in range(len(layer_sizes) - 1):
-        in_f, out_f = layer_sizes[i], layer_sizes[i + 1]
-        relu_ops["multiplications"] += out_f * in_f
-        relu_ops["additions"] += out_f * (in_f - 1) + out_f  # matmul + bias
-        if i < len(layer_sizes) - 2:
-            relu_ops["comparisons"] += out_f  # ReLU comparisons
+        relu_muls += layer_sizes[i] * layer_sizes[i + 1]
+        relu_adds += layer_sizes[i] * layer_sizes[i + 1] + layer_sizes[i + 1]
 
-    mmp_ops = count_operations(mmp_model, (784,))
-    pure_ops = count_operations(pure_tropical, (784,))
+    print(f"  ReLU Network:")
+    print(f"    Multiplications: {relu_muls:,}")
+    print(f"    Additions: {relu_adds:,}")
 
-    print(f"\n  Standard ReLU:")
-    print(f"    Multiplications: {relu_ops['multiplications']:,}")
-    print(f"    Additions:       {relu_ops['additions']:,}")
-    print(f"    Comparisons:     {relu_ops['comparisons']:,}")
+    # Tropical network: Linear layers have muls, tropical layers only have adds/comparisons
+    # Linear: 784→256, 256→128, 128→10
+    # Tropical: MaxPlusAffine(256), MinPlusAffine(256), MaxPlusAffine(128), MinPlusAffine(128)
+    trop_muls = layer_sizes[0] * layer_sizes[1]  # First linear
+    for i in range(1, len(layer_sizes) - 1):
+        trop_muls += layer_sizes[i] * layer_sizes[i + 1]  # Hidden/output linear
 
-    print(f"\n  MMP-NN (Hybrid):")
-    print(f"    Multiplications: {mmp_ops['multiplications']:,}")
-    print(f"    Additions:       {mmp_ops['additions']:,}")
-    print(f"    Comparisons:     {mmp_ops['comparisons']:,}")
+    # Tropical layers: n*n additions + n*n comparisons (for each MaxPlus and MinPlus)
+    trop_adds = 0
+    trop_comps = 0
+    for i in range(1, len(layer_sizes) - 1):
+        dim = layer_sizes[i]
+        # MaxPlusAffine + MinPlusAffine
+        trop_adds += 2 * dim * dim  # x[k] + W[k,j]
+        trop_comps += 2 * dim * dim  # max/min comparisons
 
-    print(f"\n  Pure Tropical:")
-    print(f"    Multiplications: {pure_ops['multiplications']:,}")
-    print(f"    Additions:       {pure_ops['additions']:,}")
-    print(f"    Comparisons:     {pure_ops['comparisons']:,}")
+    print(f"  Tropical Network:")
+    print(f"    Multiplications: {trop_muls:,}")
+    print(f"    Additions: {trop_adds:,} (tropical layers)")
+    print(f"    Comparisons: {trop_comps:,} (max/min)")
 
-    # Calculate reduction
-    if relu_ops['multiplications'] > 0:
-        mmp_reduction = 1 - mmp_ops['multiplications'] / relu_ops['multiplications']
-        pure_reduction = 1 - pure_ops['multiplications'] / relu_ops['multiplications']
-        print(f"\nMultiplication Reduction:")
-        print(f"  MMP-NN (Hybrid):   {mmp_reduction:.1%}")
-        print(f"  Pure Tropical:     {pure_reduction:.1%}")
+    # Note about tropical advantage
+    print("\nNote: Tropical layers use only additions and max/min operations,")
+    print("which are more efficient than multiplications on specialized hardware.")
 
 
 if __name__ == "__main__":

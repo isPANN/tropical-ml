@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-Train MMP Neural Networks on ImageNet.
+Train Tropical Neural Networks on ImageNet.
 
-This script trains MMP networks on ImageNet with distributed training support,
-mixed precision, and proper data augmentation.
+Conv backbone + tropical classifier head.
 
 Usage:
     # Single GPU
-    python train_imagenet.py --data /path/to/imagenet --model mmp
+    python train_imagenet.py --data /path/to/imagenet --model tropical
 
     # Multi-GPU (DDP)
-    torchrun --nproc_per_node=4 train_imagenet.py --data /path/to/imagenet --model mmp
+    torchrun --nproc_per_node=4 train_imagenet.py --data /path/to/imagenet --model tropical
 
     # Baseline comparison
     python train_imagenet.py --data /path/to/imagenet --model baseline
 
 Requirements:
-    pip install tropical-activation torchvision timm
+    pip install tropical-activation torchvision
 """
 
 import argparse
@@ -40,7 +39,7 @@ from torchvision import datasets, transforms
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tropical_activation.vision import create_imagenet_model, ImageNetMMP
+from tropical_activation.vision import create_imagenet_model, ImageNetTropical
 from tropical_activation.training import tropical_weight_init, count_parameters
 
 
@@ -262,10 +261,10 @@ def evaluate(model, loader, criterion, device, use_amp=False):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train MMP-NN on ImageNet")
+    parser = argparse.ArgumentParser(description="Train Tropical NN on ImageNet")
     parser.add_argument("--data", type=str, required=True, help="Path to ImageNet dataset")
-    parser.add_argument("--model", type=str, default="mmp",
-                       choices=["mmp", "baseline"],
+    parser.add_argument("--model", type=str, default="tropical",
+                       choices=["tropical", "baseline"],
                        help="Model architecture")
     parser.add_argument("--epochs", type=int, default=90)
     parser.add_argument("--batch-size", type=int, default=256)
@@ -326,7 +325,7 @@ def main():
     model.to(device)
 
     # Initialize tropical weights
-    if "mmp" in args.model:
+    if "tropical" in args.model:
         tropical_weight_init(model, init_scale=0.1)
 
     # Wrap with DDP

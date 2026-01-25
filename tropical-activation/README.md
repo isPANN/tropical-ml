@@ -1,6 +1,8 @@
 # Tropical Activation
 
-Min-Max-Plus Neural Networks using Tropical Algebra.
+Neural Networks with Tropical Algebra.
+
+Replaces ReLU/activations with tropical affine layers (max/min + addition only).
 
 ## Installation
 
@@ -12,119 +14,62 @@ pip install tropical-activation
 
 ```python
 import torch
-from tropical_activation import MMPNN, MaxPlusLayer
+from tropical_activation import TropicalNN, MaxPlusAffine
 
-# Create an MMP classifier
-model = MMPNN([784, 256, 128, 10])
-
-# Forward pass
+# Tropical classifier
+model = TropicalNN([784, 256, 128, 10])
 x = torch.randn(32, 784)
 logits = model(x)
 
-# Or use individual layers
-layer = MaxPlusLayer(64, 128)
-output = layer(torch.randn(32, 64))
+# Individual layer (square matrix, acts as activation)
+layer = MaxPlusAffine(256)  # 256 → 256
+output = layer(torch.randn(32, 256))
 ```
 
-## Model Architectures
-
-### Baseline (Standard ReLU Network)
-
-```
-┌───────┐     ┌───────┐     ┌───────┐     ┌───────┐     ┌───────┐
-│ Input │────▶│Linear │────▶│ ReLU  │────▶│Linear │────▶│ ReLU  │────▶ Output
-└───────┘     └───────┘     └───────┘     └───────┘     └───────┘
-                 W×x           max(x,0)       W×x          max(x,0)
-
-              ╔═══════════════════════════════════════════════════╗
-              ║  Multiplications: Many (every Linear layer)       ║
-              ╚═══════════════════════════════════════════════════╝
-```
-
-### Hybrid (Linear + MaxPlus + MinPlus) - Recommended
+## Architecture
 
 ```
 ┌───────┐     ┌───────┐     ┌─────────┐     ┌─────────┐     ┌───────┐
-│ Input │────▶│Linear │────▶│ MaxPlus │────▶│ MinPlus │────▶│Linear │────▶ ...
+│ Input │────▶│Linear │────▶│ MaxPlus │────▶│ MinPlus │────▶│Linear │────▶ Output
 └───────┘     └───────┘     └─────────┘     └─────────┘     └───────┘
-                 W×x         max(x+W)         min(x+W)         W×x
-
-              ╔═══════════════════════════════════════════════════╗
-              ║  Multiplications: Some (Linear layers only)       ║
-              ║  Tropical layers use addition + max/min           ║
-              ╚═══════════════════════════════════════════════════╝
+                 W×x        max(x+W,b)       min(x+W,b)         W×x
 ```
 
-### Tropical (Minimal Multiplications)
+**Key design:**
+- Linear layers handle dimension changes
+- Tropical layers are **square** (activation replacement)
+- LayerNorm before tropical operation (stabilizes training)
+- Bias as **threshold** via max/min (true tropical affine)
 
+## Layers
+
+**MaxPlusAffine:**
 ```
-┌───────┐     ┌───────┐     ┌─────────┐     ┌─────────┐     ┌─────────┐
-│ Input │────▶│Linear │────▶│ MaxPlus │────▶│ MinPlus │────▶│ MaxPlus │────▶ ...
-└───────┘     └───────┘     └─────────┘     └─────────┘     └─────────┘
-              (first only)   max(x+W)         min(x+W)        max(x+W)
-
-              ╔═══════════════════════════════════════════════════╗
-              ║  Multiplications: Minimal (first layer only)      ║
-              ║  Rest of network is multiplication-free           ║
-              ╚═══════════════════════════════════════════════════╝
-```
-
-### Pure (Zero Multiplications)
-
-```
-┌───────┐     ┌─────────┐     ┌─────────┐     ┌─────────┐     ┌─────────┐
-│ Input │────▶│ MaxPlus │────▶│ MinPlus │────▶│ MaxPlus │────▶│ MinPlus │────▶ Output
-└───────┘     └─────────┘     └─────────┘     └─────────┘     └─────────┘
-               max(x+W)         min(x+W)        max(x+W)         min(x+W)
-
-              ╔═══════════════════════════════════════════════════╗
-              ║  Multiplications: ZERO                            ║
-              ║  Only additions and max/min comparisons           ║
-              ╚═══════════════════════════════════════════════════╝
+y[i] = max(max_k(LayerNorm(x)[k] + W[k,i]), b[i])
 ```
 
-### Architecture Comparison
-
-| Model | Linear Layers | Tropical Layers | Multiplications | Use Case |
-|-------|---------------|-----------------|-----------------|----------|
-| `baseline` | All | None | Many | Standard baseline |
-| `hybrid` | Alternating | Alternating | Some | Best accuracy (recommended) |
-| `tropical` | First only | Rest | Minimal | Efficiency + accuracy |
-| `pure` | None | All | **Zero** | Maximum efficiency |
-
-## Mathematical Foundation
-
-**Standard Linear Layer:**
+**MinPlusAffine:**
 ```
-y = W × x + b       (uses multiplication)
+y[i] = min(min_k(LayerNorm(x)[k] + W[k,i]), b[i])
 ```
 
-**MaxPlus Layer (Tropical):**
-```
-y_j = max_k(x_k + W_kj) + b_j    (addition + max only)
-```
+## Why Tropical?
 
-**MinPlus Layer (Tropical):**
-```
-y_j = min_k(x_k + W_kj) + b_j    (addition + min only)
-```
+| Operation | ReLU | Tropical |
+|-----------|------|----------|
+| Forward | multiply + max | **add + max/min** |
+| Multiplications | Many | Fewer |
+| Hardware | Standard | Efficient (add/max only) |
 
 ## Training
 
 ```bash
-# Train on MNIST
-python examples/train_mnist.py --model hybrid --epochs 20
+# MNIST
+python examples/train_mnist.py --model tropical --epochs 15
+python examples/train_mnist.py --model baseline --epochs 15
 
-# Compare architectures
-python examples/train_mnist.py --model baseline --epochs 20
-python examples/train_mnist.py --model tropical --epochs 20
-python examples/train_mnist.py --model pure --epochs 20
-
-# Train on CIFAR-10
-python examples/train_cifar10.py --model mmp --epochs 200
-
-# Train on ImageNet (distributed)
-torchrun --nproc_per_node=4 examples/train_imagenet.py --data /path/to/imagenet --amp
+# CIFAR-10
+python examples/train_cifar10.py --model tropical --epochs 200
 ```
 
 ## Reference
