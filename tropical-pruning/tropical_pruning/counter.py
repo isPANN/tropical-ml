@@ -155,7 +155,7 @@ class WinnerCounter:
         """
         Compute tropical max-plus with argmax using tropical-gemm library.
 
-        Uses the optimized Rust SIMD implementation for high performance.
+        Uses GPU implementation when available, otherwise falls back to CPU SIMD.
         """
         # tropical_gemm.maxplus_matmul_with_argmax expects:
         # A: (M, K), B: (K, N) -> C: (M, N) flattened, argmax: (M, N) flattened
@@ -173,12 +173,20 @@ class WinnerCounter:
         # We need x @ W^T, so B = W^T with shape (K, N)
         weight_t = weight.t().contiguous()  # (K, N)
 
-        # Convert to numpy for tropical_gemm (CPU, SIMD-accelerated)
-        x_np = x_flat.detach().cpu().numpy().astype('float32')
-        w_np = weight_t.detach().cpu().numpy().astype('float32')
+        # Use DLPack for zero-copy GPU tensor exchange when available
+        _dlpack_available = hasattr(tg, 'maxplus_matmul_dlpack')
 
-        # Call tropical_gemm - returns flattened arrays
-        result_flat, argmax_flat = tg.maxplus_matmul_with_argmax(x_np, w_np)
+        if x.is_cuda and _dlpack_available:
+            # Zero-copy path: pass GPU tensors directly via DLPack
+            x_contig = x_flat.contiguous()
+            _, argmax_flat = tg.maxplus_matmul_dlpack(x_contig, weight_t)
+        else:
+            # Fallback: convert to numpy for CPU backend
+            if x.is_cuda:
+                print("Warning: Creating CPU copy for GPU tensor. This is inefficient.")
+            x_np = x_flat.detach().cpu().numpy().astype('float32')
+            w_np = weight_t.detach().cpu().numpy().astype('float32')
+            _, argmax_flat = tg.maxplus_matmul_cpu_with_argmax(x_np, w_np)
 
         # Reshape from flattened (M*N,) to (M, N) then to original batch shape
         argmax_indices = torch.from_numpy(argmax_flat).reshape(M, N)
