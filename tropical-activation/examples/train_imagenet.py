@@ -2,17 +2,33 @@
 """
 Train Tropical Neural Networks on ImageNet.
 
-Conv backbone + tropical classifier head.
+Compares three architectures:
+1. Standard ReLU Network (baseline)
+2. Hybrid Tropical NN (Linear -> TropicalAffine) - RECOMMENDED
+3. Full MMP Tropical NN (Linear -> MaxPlus -> MinPlus)
+
+ResNet-34 style backbone + classifier head.
 
 Usage:
     # Single GPU
-    python train_imagenet.py --data /path/to/imagenet --model tropical
+    python train_imagenet.py --data /path/to/imagenet --model baseline
+    python train_imagenet.py --data /path/to/imagenet --model hybrid --use-gpu    # Recommended
+    python train_imagenet.py --data /path/to/imagenet --model mmp --use-gpu
 
     # Multi-GPU (DDP)
-    torchrun --nproc_per_node=4 train_imagenet.py --data /path/to/imagenet --model tropical
+    torchrun --nproc_per_node=4 train_imagenet.py --data /path/to/imagenet --model hybrid --use-gpu
 
-    # Baseline comparison
-    python train_imagenet.py --data /path/to/imagenet --model baseline
+Architecture Details (classifier head after ResNet backbone):
+    Baseline:  Linear -> ReLU -> Linear
+    Hybrid:    Linear -> TropicalAffine -> Linear
+    MMP:       Linear -> MaxPlus -> MinPlus -> Linear
+
+TropicalAffine/MaxPlusAffine: y[i] = max(max_k(LayerNorm(x)[k] + W[k,i]), b[i])
+MinPlusAffine: y[i] = min(min_k(LayerNorm(x)[k] + W[k,i]), b[i])
+
+GPU Acceleration:
+    When --use-gpu is enabled, tropical layers use optimized CUDA kernels from
+    tropical-gemm for both forward and backward passes.
 
 Requirements:
     pip install tropical-activation torchvision
@@ -23,12 +39,11 @@ import json
 import os
 import random
 import time
-import warnings
-from datetime import datetime
 from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -39,7 +54,7 @@ from torchvision import datasets, transforms
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tropical_activation.vision import create_imagenet_model, ImageNetTropical
+from tropical_activation import MaxPlusAffine, MinPlusAffine, TropicalAffine, GPU_AVAILABLE
 from tropical_activation.training import tropical_weight_init, count_parameters
 
 
@@ -129,6 +144,107 @@ def get_imagenet_loaders(
     )
 
     return train_loader, val_loader, train_sampler
+
+
+class ResBlock(nn.Module):
+    """Residual block."""
+
+    def __init__(self, channels: int):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, 3, 1, 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, 3, 1, 1, bias=False)
+        self.bn2 = nn.BatchNorm2d(channels)
+
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        return F.relu(out + x)
+
+
+class ImageNetModel(nn.Module):
+    """
+    ImageNet model with ResNet-34 style backbone and configurable classifier head.
+
+    Args:
+        model_type: One of "baseline", "hybrid", "mmp"
+        num_classes: Number of output classes
+        dropout: Dropout probability
+        use_gpu: Use tropical-gemm GPU kernels for tropical layers
+    """
+
+    def __init__(self, model_type: str = "hybrid", num_classes: int = 1000,
+                 dropout: float = 0.2, use_gpu: bool = False):
+        super().__init__()
+        self.model_type = model_type
+
+        # ResNet-34 style backbone
+        # Stem
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, 64, 7, stride=2, padding=3, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(True),
+            nn.MaxPool2d(3, stride=2, padding=1),
+        )
+
+        # Stages
+        self.stage1 = self._make_stage(64, 64, 3)
+        self.stage2 = self._make_stage(64, 128, 4, stride=2)
+        self.stage3 = self._make_stage(128, 256, 6, stride=2)
+        self.stage4 = self._make_stage(256, 512, 3, stride=2)
+
+        self.avgpool = nn.AdaptiveAvgPool2d(1)
+
+        # Classifier head
+        if model_type == "baseline":
+            # Standard ReLU classifier
+            self.classifier = nn.Sequential(
+                nn.Linear(512, 1024),
+                nn.ReLU(True),
+                nn.Dropout(dropout),
+                nn.Linear(1024, num_classes),
+            )
+        elif model_type == "hybrid":
+            # Hybrid: Linear -> TropicalAffine (RECOMMENDED)
+            self.classifier = nn.Sequential(
+                nn.Linear(512, 1024),
+                TropicalAffine(1024, use_gpu=use_gpu),
+                nn.Dropout(dropout),
+                nn.Linear(1024, num_classes),
+            )
+        elif model_type == "mmp":
+            # Full MMP: Linear -> MaxPlus -> MinPlus
+            self.classifier = nn.Sequential(
+                nn.Linear(512, 1024),
+                MaxPlusAffine(1024, use_gpu=use_gpu),
+                MinPlusAffine(1024, use_gpu=use_gpu),
+                nn.Dropout(dropout),
+                nn.Linear(1024, num_classes),
+            )
+        else:
+            raise ValueError(f"Unknown model type: {model_type}")
+
+    def _make_stage(self, in_ch: int, out_ch: int, num_blocks: int, stride: int = 1):
+        layers = []
+        if stride != 1 or in_ch != out_ch:
+            layers.append(nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, 3, stride, 1, bias=False),
+                nn.BatchNorm2d(out_ch),
+                nn.ReLU(True),
+            ))
+        for _ in range(num_blocks):
+            layers.append(ResBlock(out_ch))
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.stage1(x)
+        x = self.stage2(x)
+        x = self.stage3(x)
+        x = self.stage4(x)
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        return self.classifier(x)
 
 
 class AverageMeter:
@@ -263,15 +379,19 @@ def evaluate(model, loader, criterion, device, use_amp=False):
 def main():
     parser = argparse.ArgumentParser(description="Train Tropical NN on ImageNet")
     parser.add_argument("--data", type=str, required=True, help="Path to ImageNet dataset")
-    parser.add_argument("--model", type=str, default="tropical",
-                       choices=["tropical", "baseline"],
-                       help="Model architecture")
+    parser.add_argument("--model", type=str, default="hybrid",
+                       choices=["baseline", "hybrid", "mmp"],
+                       help="Model type: baseline (ReLU), hybrid (recommended), mmp (full)")
     parser.add_argument("--epochs", type=int, default=90)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=0.1)
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--init-scale", type=float, default=0.1,
+                       help="Initialization scale for tropical weights")
+    parser.add_argument("--use-gpu", action="store_true",
+                       help="Use tropical-gemm GPU kernels (requires CUDA)")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--save-dir", type=str, default="./checkpoints")
     parser.add_argument("--seed", type=int, default=42)
@@ -294,9 +414,36 @@ def main():
     else:
         device = torch.device("cpu")
 
+    # Determine if we should use tropical-gemm GPU kernels
+    use_tropical_gpu = args.use_gpu and GPU_AVAILABLE and torch.cuda.is_available()
+
     if is_main_process():
         print(f"Using device: {device}")
         print(f"Distributed: {distributed} (world_size={world_size})")
+
+        print("=" * 70)
+        print(f"ImageNet Training: {args.model.upper()}")
+        print("=" * 70)
+
+        if args.model in ["hybrid", "mmp"]:
+            print(f"Tropical GPU kernels: {'enabled' if use_tropical_gpu else 'disabled'}")
+            if args.use_gpu and not use_tropical_gpu:
+                if not GPU_AVAILABLE:
+                    print("  (tropical-gemm GPU not available)")
+                elif not torch.cuda.is_available():
+                    print("  (CUDA not available)")
+
+        # Print architecture description
+        if args.model == "baseline":
+            print("\nClassifier: Linear -> ReLU -> Linear")
+        elif args.model == "hybrid":
+            print("\nClassifier: Linear -> TropicalAffine -> Linear")
+            print("TropicalAffine: y[i] = max(max_k(LayerNorm(x)[k] + W[k,i]), b[i])")
+            print("(RECOMMENDED architecture)")
+        else:  # mmp
+            print("\nClassifier: Linear -> MaxPlus -> MinPlus -> Linear")
+            print("MaxPlusAffine: y[i] = max(max_k(LayerNorm(x)[k] + W[k,i]), b[i])")
+            print("MinPlusAffine: y[i] = min(min_k(LayerNorm(x)[k] + W[k,i]), b[i])")
 
     # Data
     if is_main_process():
@@ -321,12 +468,12 @@ def main():
     if is_main_process():
         print(f"\nCreating {args.model} model...")
 
-    model = create_imagenet_model(args.model, dropout=args.dropout)
+    model = ImageNetModel(model_type=args.model, dropout=args.dropout, use_gpu=use_tropical_gpu)
     model.to(device)
 
     # Initialize tropical weights
-    if "tropical" in args.model:
-        tropical_weight_init(model, init_scale=0.1)
+    if args.model in ["hybrid", "mmp"]:
+        tropical_weight_init(model, init_scale=args.init_scale)
 
     # Wrap with DDP
     if distributed:

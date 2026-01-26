@@ -2,11 +2,29 @@
 """
 Train Tropical Neural Networks on CIFAR-10.
 
-Conv backbone + tropical classifier head.
+Compares three architectures:
+1. Standard ReLU Network (baseline)
+2. Hybrid Tropical NN (Linear -> TropicalAffine) - RECOMMENDED
+3. Full MMP Tropical NN (Linear -> MaxPlus -> MinPlus)
+
+Conv backbone for feature extraction + classifier head.
 
 Usage:
-    python train_cifar10.py --model tropical --epochs 200
     python train_cifar10.py --model baseline --epochs 200
+    python train_cifar10.py --model hybrid --epochs 200 --use-gpu    # Recommended
+    python train_cifar10.py --model mmp --epochs 200 --use-gpu
+
+Architecture Details (classifier head after conv backbone):
+    Baseline:  Linear -> ReLU -> Linear -> ReLU -> Linear
+    Hybrid:    Linear -> TropicalAffine -> Linear
+    MMP:       Linear -> MaxPlus -> MinPlus -> Linear
+
+TropicalAffine/MaxPlusAffine: y[i] = max(max_k(LayerNorm(x)[k] + W[k,i]), b[i])
+MinPlusAffine: y[i] = min(min_k(LayerNorm(x)[k] + W[k,i]), b[i])
+
+GPU Acceleration:
+    When --use-gpu is enabled, tropical layers use optimized CUDA kernels from
+    tropical-gemm for both forward and backward passes.
 
 Requirements:
     pip install tropical-activation torchvision
@@ -16,7 +34,6 @@ import argparse
 import json
 import os
 import time
-from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -28,7 +45,7 @@ from torchvision import datasets, transforms
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tropical_activation.vision import create_cifar10_model
+from tropical_activation import MaxPlusAffine, MinPlusAffine, TropicalAffine, GPU_AVAILABLE
 from tropical_activation.training import tropical_weight_init, count_parameters
 
 
@@ -89,6 +106,92 @@ def get_cifar10_loaders(
     return train_loader, test_loader
 
 
+class ConvBackbone(nn.Module):
+    """VGG-style conv backbone for CIFAR-10."""
+
+    def __init__(self):
+        super().__init__()
+        self.features = nn.Sequential(
+            # Block 1: 32x32 -> 16x16
+            nn.Conv2d(3, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(True),
+            nn.Conv2d(64, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(True),
+            nn.MaxPool2d(2, 2),
+            # Block 2: 16x16 -> 8x8
+            nn.Conv2d(64, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(True),
+            nn.Conv2d(128, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(True),
+            nn.MaxPool2d(2, 2),
+            # Block 3: 8x8 -> 4x4
+            nn.Conv2d(128, 256, 3, padding=1), nn.BatchNorm2d(256), nn.ReLU(True),
+            nn.Conv2d(256, 256, 3, padding=1), nn.BatchNorm2d(256), nn.ReLU(True),
+            nn.MaxPool2d(2, 2),
+        )
+        self.out_features = 256 * 4 * 4
+
+    def forward(self, x):
+        x = self.features(x)
+        return x.view(x.size(0), -1)
+
+
+class CIFAR10Model(nn.Module):
+    """
+    CIFAR-10 model with conv backbone and configurable classifier head.
+
+    Args:
+        model_type: One of "baseline", "hybrid", "mmp"
+        dropout: Dropout probability
+        use_gpu: Use tropical-gemm GPU kernels for tropical layers
+    """
+
+    def __init__(self, model_type: str = "hybrid", dropout: float = 0.1, use_gpu: bool = False):
+        super().__init__()
+        self.model_type = model_type
+
+        # Conv backbone
+        self.backbone = ConvBackbone()
+        feature_dim = self.backbone.out_features
+
+        # Classifier head
+        if model_type == "baseline":
+            # Standard ReLU classifier
+            self.classifier = nn.Sequential(
+                nn.Linear(feature_dim, 512),
+                nn.ReLU(True),
+                nn.Dropout(dropout),
+                nn.Linear(512, 128),
+                nn.ReLU(True),
+                nn.Dropout(dropout),
+                nn.Linear(128, 10),
+            )
+        elif model_type == "hybrid":
+            # Hybrid: Linear -> TropicalAffine (RECOMMENDED)
+            self.classifier = nn.Sequential(
+                nn.Linear(feature_dim, 512),
+                TropicalAffine(512, use_gpu=use_gpu),
+                nn.Dropout(dropout),
+                nn.Linear(512, 128),
+                TropicalAffine(128, use_gpu=use_gpu),
+                nn.Linear(128, 10),
+            )
+        elif model_type == "mmp":
+            # Full MMP: Linear -> MaxPlus -> MinPlus
+            self.classifier = nn.Sequential(
+                nn.Linear(feature_dim, 512),
+                MaxPlusAffine(512, use_gpu=use_gpu),
+                MinPlusAffine(512, use_gpu=use_gpu),
+                nn.Dropout(dropout),
+                nn.Linear(512, 128),
+                MaxPlusAffine(128, use_gpu=use_gpu),
+                MinPlusAffine(128, use_gpu=use_gpu),
+                nn.Linear(128, 10),
+            )
+        else:
+            raise ValueError(f"Unknown model type: {model_type}")
+
+    def forward(self, x):
+        x = self.backbone(x)
+        return self.classifier(x)
+
+
 class AverageMeter:
     """Computes and stores the average and current value."""
 
@@ -125,7 +228,7 @@ def accuracy(output, target, topk=(1,)):
         return res
 
 
-def train_epoch(model, loader, optimizer, criterion, device, epoch):
+def train_epoch(model, loader, optimizer, criterion, device):
     """Train for one epoch."""
     model.train()
 
@@ -133,7 +236,7 @@ def train_epoch(model, loader, optimizer, criterion, device, epoch):
     top1 = AverageMeter()
     top5 = AverageMeter()
 
-    for batch_idx, (data, target) in enumerate(loader):
+    for data, target in loader:
         data, target = data.to(device), target.to(device)
 
         optimizer.zero_grad()
@@ -142,7 +245,6 @@ def train_epoch(model, loader, optimizer, criterion, device, epoch):
         loss.backward()
         optimizer.step()
 
-        # Measure accuracy
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
         losses.update(loss.item(), data.size(0))
         top1.update(acc1[0].item(), data.size(0))
@@ -183,16 +285,20 @@ def evaluate(model, loader, criterion, device):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train MMP-NN on CIFAR-10")
-    parser.add_argument("--model", type=str, default="tropical",
-                       choices=["tropical", "baseline", "resnet_tropical", "resnet_baseline"],
-                       help="Model architecture")
+    parser = argparse.ArgumentParser(description="Train Tropical NN on CIFAR-10")
+    parser.add_argument("--model", type=str, default="hybrid",
+                       choices=["baseline", "hybrid", "mmp"],
+                       help="Model type: baseline (ReLU), hybrid (recommended), mmp (full)")
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=0.1)
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--weight-decay", type=float, default=5e-4)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--init-scale", type=float, default=0.1,
+                       help="Initialization scale for tropical weights")
+    parser.add_argument("--use-gpu", action="store_true",
+                       help="Use tropical-gemm GPU kernels (requires CUDA)")
     parser.add_argument("--data-dir", type=str, default="./data")
     parser.add_argument("--save-dir", type=str, default="./checkpoints")
     parser.add_argument("--seed", type=int, default=42)
@@ -207,7 +313,35 @@ def main():
 
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Determine if we should use tropical-gemm GPU kernels
+    use_tropical_gpu = args.use_gpu and GPU_AVAILABLE and torch.cuda.is_available()
+
     print(f"Using device: {device}")
+
+    print("=" * 70)
+    print(f"CIFAR-10 Training: {args.model.upper()}")
+    print("=" * 70)
+
+    if args.model in ["hybrid", "mmp"]:
+        print(f"Tropical GPU kernels: {'enabled' if use_tropical_gpu else 'disabled'}")
+        if args.use_gpu and not use_tropical_gpu:
+            if not GPU_AVAILABLE:
+                print("  (tropical-gemm GPU not available)")
+            elif not torch.cuda.is_available():
+                print("  (CUDA not available)")
+
+    # Print architecture description
+    if args.model == "baseline":
+        print("\nClassifier: Linear -> ReLU -> Linear -> ReLU -> Linear")
+    elif args.model == "hybrid":
+        print("\nClassifier: Linear -> TropicalAffine -> Linear -> TropicalAffine -> Linear")
+        print("TropicalAffine: y[i] = max(max_k(LayerNorm(x)[k] + W[k,i]), b[i])")
+        print("(RECOMMENDED architecture)")
+    else:  # mmp
+        print("\nClassifier: Linear -> MaxPlus -> MinPlus -> Linear -> MaxPlus -> MinPlus -> Linear")
+        print("MaxPlusAffine: y[i] = max(max_k(LayerNorm(x)[k] + W[k,i]), b[i])")
+        print("MinPlusAffine: y[i] = min(min_k(LayerNorm(x)[k] + W[k,i]), b[i])")
 
     # Data
     print("\nLoading CIFAR-10...")
@@ -219,12 +353,12 @@ def main():
 
     # Model
     print(f"\nCreating {args.model} model...")
-    model = create_cifar10_model(args.model, dropout=args.dropout)
+    model = CIFAR10Model(model_type=args.model, dropout=args.dropout, use_gpu=use_tropical_gpu)
     model.to(device)
 
     # Initialize tropical weights
-    if "tropical" in args.model:
-        tropical_weight_init(model, init_scale=0.1)
+    if args.model in ["hybrid", "mmp"]:
+        tropical_weight_init(model, init_scale=args.init_scale)
 
     # Model info
     param_counts = count_parameters(model)
@@ -271,7 +405,7 @@ def main():
     for epoch in range(start_epoch, args.epochs + 1):
         start_time = time.time()
 
-        train_metrics = train_epoch(model, train_loader, optimizer, criterion, device, epoch)
+        train_metrics = train_epoch(model, train_loader, optimizer, criterion, device)
         test_metrics = evaluate(model, test_loader, criterion, device)
         scheduler.step()
 
