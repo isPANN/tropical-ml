@@ -13,8 +13,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .layers import MaxPlusAffine, MinPlusAffine
-from .blocks import TropicalBlock, TropicalMLP
+from .layers import MaxPlusAffine, MinPlusAffine, TropicalAffine
+from .blocks import TropicalBlock, TropicalMLP, HybridBlock, HybridMLP
 
 
 class TropicalNN(nn.Module):
@@ -70,6 +70,99 @@ class TropicalNN(nn.Module):
 
 # Alias for backward compatibility
 MMPNN = TropicalNN
+
+
+class HybridTropicalNN(nn.Module):
+    """
+    Hybrid Tropical Neural Network (from mnist_tropical.py architecture).
+
+    Uses only TropicalAffine (MaxPlusAffine) without MinPlus, which is simpler
+    and often performs equally well.
+
+    Architecture:
+        Linear → TropicalAffine → Linear → TropicalAffine → ... → Linear
+
+    This is the recommended architecture for most applications.
+
+    Args:
+        layer_sizes: List of layer sizes [input, hidden1, hidden2, ..., output]
+        use_gpu: Use GPU acceleration for tropical layers.
+        dropout: Dropout probability. Default: 0.0.
+
+    Shape:
+        - Input: (N, layer_sizes[0])
+        - Output: (N, layer_sizes[-1])
+
+    Example:
+        >>> model = HybridTropicalNN([784, 256, 128, 10])
+        >>> x = torch.randn(32, 784)
+        >>> output = model(x)  # shape: (32, 10)
+    """
+
+    def __init__(
+        self,
+        layer_sizes: List[int],
+        use_gpu: bool = False,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        assert len(layer_sizes) >= 2, "Need at least input and output sizes"
+
+        self.layer_sizes = layer_sizes
+        layers = []
+
+        for i in range(len(layer_sizes) - 1):
+            in_dim = layer_sizes[i]
+            out_dim = layer_sizes[i + 1]
+
+            if i < len(layer_sizes) - 2:
+                # Hidden: Linear → TropicalAffine
+                layers.append(HybridBlock(in_dim, out_dim, use_gpu=use_gpu, dropout=dropout))
+            else:
+                # Output: just Linear
+                layers.append(nn.Linear(in_dim, out_dim))
+
+        self.layers = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.layers(x)
+
+
+class HybridClassifier(nn.Module):
+    """
+    Hybrid Classifier for image/vector classification.
+
+    Uses the hybrid architecture (Linear → TropicalAffine only).
+
+    Args:
+        input_dim: Input dimension (e.g., 784 for MNIST).
+        hidden_dims: List of hidden dimensions.
+        num_classes: Number of output classes.
+        use_gpu: Use GPU acceleration.
+        dropout: Dropout probability.
+
+    Example:
+        >>> model = HybridClassifier(784, [256, 128], 10)
+        >>> x = torch.randn(32, 784)
+        >>> logits = model(x)
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: List[int],
+        num_classes: int,
+        use_gpu: bool = False,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        layer_sizes = [input_dim] + hidden_dims + [num_classes]
+        self.net = HybridTropicalNN(layer_sizes, use_gpu=use_gpu, dropout=dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() > 2:
+            x = x.view(x.size(0), -1)
+        return self.net(x)
 
 
 class TropicalClassifier(nn.Module):
@@ -256,7 +349,51 @@ def create_tropical_nn(
 create_mmpnn = create_tropical_nn
 
 
+def create_hybrid_nn(
+    architecture: str,
+    input_dim: int,
+    num_classes: int,
+    use_gpu: bool = False,
+    dropout: float = 0.0,
+) -> HybridTropicalNN:
+    """
+    Factory function to create Hybrid Tropical NNs.
+
+    Uses the simpler architecture with only TropicalAffine (no MinPlus).
+    This is the recommended architecture for most applications.
+
+    Args:
+        architecture: One of "tiny", "small", "medium", "large"
+        input_dim: Input dimension
+        num_classes: Number of output classes
+        use_gpu: Use GPU acceleration
+        dropout: Dropout probability
+
+    Returns:
+        HybridTropicalNN model
+
+    Example:
+        >>> model = create_hybrid_nn("medium", 784, 10)
+    """
+    architectures = {
+        "tiny": [input_dim, 64, num_classes],
+        "small": [input_dim, 128, 64, num_classes],
+        "medium": [input_dim, 256, 128, num_classes],
+        "large": [input_dim, 512, 256, 128, num_classes],
+    }
+
+    if architecture not in architectures:
+        raise ValueError(f"Unknown: {architecture}. Choose from {list(architectures.keys())}")
+
+    return HybridTropicalNN(architectures[architecture], use_gpu=use_gpu, dropout=dropout)
+
+
 __all__ = [
+    # Recommended (Hybrid architecture)
+    "HybridTropicalNN",
+    "HybridClassifier",
+    "create_hybrid_nn",
+    # Full MMP (MaxPlus + MinPlus)
     "TropicalNN",
     "TropicalClassifier",
     "PureTropicalNN",

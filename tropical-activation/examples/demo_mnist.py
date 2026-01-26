@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-Demo: Train Tropical Neural Network on MNIST.
+Demo: Train Hybrid Tropical Neural Network on MNIST.
 
-Simple demonstration of tropical networks on MNIST.
+This demonstrates the recommended hybrid architecture that works very well:
+    Linear → TropicalAffine → Linear → TropicalAffine → ... → Linear
+
+TropicalAffine: y[i] = max(max_k(LayerNorm(x)[k] + W[k,i]), b[i])
 
 Usage:
     python demo_mnist.py [--epochs 10]
@@ -23,7 +26,7 @@ from torchvision import datasets, transforms
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tropical_activation import TropicalNN
+from tropical_activation import HybridTropicalNN
 from tropical_activation.training import tropical_weight_init, count_parameters
 
 
@@ -90,7 +93,7 @@ def evaluate(model, loader, criterion):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Demo: Tropical NN on MNIST")
+    parser = argparse.ArgumentParser(description="Demo: Hybrid Tropical NN on MNIST")
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
     parser.add_argument("--batch-size", type=int, default=128, help="Batch size")
     parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
@@ -98,9 +101,12 @@ def main():
                        help="Directory for MNIST data")
     args = parser.parse_args()
 
-    print("=" * 50)
-    print("Tropical Neural Network Demo - MNIST")
-    print("=" * 50)
+    print("=" * 60)
+    print("Hybrid Tropical Neural Network Demo - MNIST")
+    print("=" * 60)
+    print()
+    print("Architecture: Linear → TropicalAffine → Linear → TropicalAffine → Linear")
+    print("TropicalAffine: y[i] = max(max_k(LayerNorm(x)[k] + W[k,i]), b[i])")
 
     # Load data
     print("\nLoading MNIST dataset...")
@@ -108,12 +114,12 @@ def main():
     print(f"Training samples: {len(train_loader.dataset)}")
     print(f"Test samples: {len(test_loader.dataset)}")
 
-    # Create model: Linear → MaxPlus → MinPlus → Linear → MaxPlus → MinPlus → Linear
-    print("\nCreating Tropical NN...")
-    model = TropicalNN([784, 256, 128, 10])
+    # Create model: Linear → TropicalAffine → Linear → TropicalAffine → Linear
+    print("\nCreating Hybrid Tropical NN...")
+    model = HybridTropicalNN([784, 256, 128, 10])
 
     # Initialize weights
-    tropical_weight_init(model, init_scale=0.1)
+    tropical_weight_init(model, init_scale=0.5)
 
     # Print model info
     param_counts = count_parameters(model)
@@ -128,6 +134,7 @@ def main():
 
     # Training loop
     print("\nTraining...")
+    print("-" * 55)
     best_acc = 0.0
 
     for epoch in range(1, args.epochs + 1):
@@ -142,7 +149,9 @@ def main():
         print(f"Epoch {epoch:2d}/{args.epochs}: "
               f"Loss={train_loss:.4f}, Train={train_acc:.1f}%, Test={test_acc:.1f}%{marker}")
 
-    print(f"\nBest test accuracy: {best_acc:.1f}%")
+    print("-" * 55)
+    print(f"Best test accuracy: {best_acc:.1f}%")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

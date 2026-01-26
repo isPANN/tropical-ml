@@ -139,9 +139,13 @@ class MinPlusAffine(nn.Module):
         return f"features={self.features}, gpu={self.use_gpu}, norm={self.use_norm}"
 
 
-# Aliases for backward compatibility
+# Aliases for backward compatibility and naming consistency
 MaxPlusLayer = MaxPlusAffine
 MinPlusLayer = MinPlusAffine
+
+# TropicalAffine is MaxPlusAffine (matches tropical-gemm examples)
+# This is the recommended tropical layer for most applications
+TropicalAffine = MaxPlusAffine
 
 
 class TropicalReLU(nn.Module):
@@ -177,6 +181,7 @@ class TropicalLeakyReLU(nn.Module):
 __all__ = [
     "MaxPlusAffine",
     "MinPlusAffine",
+    "TropicalAffine",  # Alias for MaxPlusAffine (recommended)
     "MaxPlusLayer",  # Alias
     "MinPlusLayer",  # Alias
     "TropicalReLU",

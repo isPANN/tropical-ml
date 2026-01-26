@@ -15,7 +15,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from .layers import MaxPlusAffine, MinPlusAffine
+from .layers import MaxPlusAffine, MinPlusAffine, TropicalAffine
 
 
 class TropicalBlock(nn.Module):
@@ -72,6 +72,120 @@ class TropicalBlock(nn.Module):
 
 # Alias for backward compatibility
 MMPBlock = TropicalBlock
+
+
+class HybridBlock(nn.Module):
+    """
+    Hybrid Block: Linear → TropicalAffine (MaxPlusAffine only)
+
+    This is the architecture from the mnist_tropical.py example that works very well.
+    Uses only MaxPlusAffine (no MinPlus), which is simpler and often equally effective.
+
+    Architecture:
+        Linear(in_features → out_features) → TropicalAffine(out_features)
+
+    The TropicalAffine layer computes:
+        y[i] = max(max_k(LayerNorm(x)[k] + W[k,i]), b[i])
+
+    Args:
+        in_features: Size of each input sample.
+        out_features: Size of each output sample.
+        use_gpu: Use GPU acceleration for tropical layers.
+        dropout: Dropout probability. Default: 0.0.
+
+    Shape:
+        - Input: (N, in_features)
+        - Output: (N, out_features)
+
+    Example:
+        >>> block = HybridBlock(784, 256)
+        >>> x = torch.randn(32, 784)
+        >>> output = block(x)  # shape: (32, 256)
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        use_gpu: bool = False,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+
+        # Linear handles dimension change
+        self.linear = nn.Linear(in_features, out_features)
+
+        # Single TropicalAffine (MaxPlusAffine) as activation
+        self.tropical = TropicalAffine(out_features, use_gpu=use_gpu)
+
+        # Optional dropout
+        self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.linear(x)      # Dimension change: W @ x + b
+        x = self.tropical(x)    # Tropical activation: max(max_k(x + W), b)
+        x = self.dropout(x)
+        return x
+
+
+class HybridMLP(nn.Module):
+    """
+    Hybrid Tropical MLP: Multiple HybridBlocks stacked.
+
+    This is the architecture from the mnist_tropical.py example.
+
+    Architecture:
+        Linear → TropicalAffine → Linear → TropicalAffine → ... → Linear
+
+    Compared to TropicalMLP which uses both MaxPlus and MinPlus:
+        Linear → MaxPlus → MinPlus → Linear → MaxPlus → MinPlus → ... → Linear
+
+    The HybridMLP is simpler (half the tropical operations) and often performs equally well.
+
+    Args:
+        layer_sizes: List of layer sizes [input, hidden1, hidden2, ..., output]
+        use_gpu: Use GPU acceleration for tropical layers.
+        dropout: Dropout probability. Default: 0.0.
+
+    Shape:
+        - Input: (N, layer_sizes[0])
+        - Output: (N, layer_sizes[-1])
+
+    Example:
+        >>> mlp = HybridMLP([784, 256, 128, 10])
+        >>> x = torch.randn(32, 784)
+        >>> output = mlp(x)  # shape: (32, 10)
+    """
+
+    def __init__(
+        self,
+        layer_sizes: list,
+        use_gpu: bool = False,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        assert len(layer_sizes) >= 2, "Need at least input and output sizes"
+
+        self.layer_sizes = layer_sizes
+        layers = []
+
+        for i in range(len(layer_sizes) - 1):
+            in_dim = layer_sizes[i]
+            out_dim = layer_sizes[i + 1]
+
+            if i < len(layer_sizes) - 2:
+                # Hidden layers: Linear → TropicalAffine
+                layers.append(HybridBlock(in_dim, out_dim, use_gpu=use_gpu, dropout=dropout))
+            else:
+                # Output layer: just Linear (no tropical activation)
+                layers.append(nn.Linear(in_dim, out_dim))
+
+        self.layers = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.layers(x)
 
 
 class ResidualTropicalBlock(nn.Module):
@@ -208,6 +322,8 @@ class TropicalMLP(nn.Module):
 
 __all__ = [
     "TropicalBlock",
+    "HybridBlock",
+    "HybridMLP",
     "ResidualTropicalBlock",
     "MaxPlusBlock",
     "MinPlusBlock",

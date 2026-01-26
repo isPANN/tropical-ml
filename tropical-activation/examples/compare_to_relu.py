@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
-Compare Tropical Networks to Standard ReLU Networks.
+Compare Tropical Network Architectures to Standard ReLU.
 
-Trains both a tropical network and a standard ReLU network on MNIST
-and compares their performance and operation counts.
+Trains three types of networks on MNIST and compares their performance:
+1. Standard ReLU Network (baseline)
+2. Hybrid Tropical NN (Linear → TropicalAffine) - RECOMMENDED
+3. Full MMP Tropical NN (Linear → MaxPlus → MinPlus)
 
 Usage:
-    python compare_to_relu.py [--epochs 15]
+    python compare_to_relu.py [--epochs 10]
 
 Requirements:
     pip install tropical-activation torchvision
 """
 
 import argparse
+import time
 from pathlib import Path
 
 import torch
@@ -24,7 +27,7 @@ from torchvision import datasets, transforms
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tropical_activation import TropicalNN
+from tropical_activation import HybridTropicalNN, TropicalNN
 from tropical_activation.training import tropical_weight_init, count_parameters
 
 
@@ -109,12 +112,13 @@ def evaluate(model, loader, criterion):
 
 
 def train_model(model, name, train_loader, test_loader, epochs, lr):
-    """Train a model and return best accuracy."""
+    """Train a model and return best accuracy and training time."""
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     best_acc = 0.0
+    start_time = time.time()
 
     for epoch in range(1, epochs + 1):
         train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion)
@@ -124,111 +128,126 @@ def train_model(model, name, train_loader, test_loader, epochs, lr):
         if test_acc > best_acc:
             best_acc = test_acc
 
-        if epoch % 5 == 0 or epoch == epochs:
-            print(f"  Epoch {epoch:2d}: Train={train_acc:.1f}%, Test={test_acc:.1f}%")
+        print(f"  Epoch {epoch:2d}/{epochs}: "
+              f"Loss={train_loss:.4f}, Train={train_acc:.1f}%, Test={test_acc:.1f}%")
 
-    return best_acc
+    elapsed = time.time() - start_time
+    return best_acc, elapsed
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compare Tropical NN to ReLU")
-    parser.add_argument("--epochs", type=int, default=15, help="Number of epochs")
+    parser = argparse.ArgumentParser(description="Compare Tropical NN architectures to ReLU")
+    parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
     parser.add_argument("--batch-size", type=int, default=128, help="Batch size")
     parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
     parser.add_argument("--data-dir", type=str, default="./data",
                        help="Directory for MNIST data")
     args = parser.parse_args()
 
-    print("=" * 60)
-    print("COMPARISON: Tropical NN vs Standard ReLU Network")
-    print("=" * 60)
+    print("=" * 70)
+    print("COMPARISON: Tropical NN Architectures vs Standard ReLU Network")
+    print("=" * 70)
 
     # Load data
     print("\nLoading MNIST dataset...")
     train_loader, test_loader = get_mnist_dataloaders(args.batch_size, args.data_dir)
+    print(f"Training samples: {len(train_loader.dataset)}")
+    print(f"Test samples: {len(test_loader.dataset)}")
 
     # Define architecture
     layer_sizes = [784, 256, 128, 10]
+    results = {}
 
-    # --- Standard ReLU Network ---
-    print("\n" + "-" * 40)
+    # --- 1. Standard ReLU Network ---
+    print("\n" + "-" * 70)
     print("1. Standard ReLU Network")
-    print("-" * 40)
+    print("   Architecture: Linear → ReLU → Linear → ReLU → Linear")
+    print("-" * 70)
 
     baseline = BaselineMLP(layer_sizes)
     baseline_params = sum(p.numel() for p in baseline.parameters())
     print(f"Parameters: {baseline_params:,}")
 
     print("Training...")
-    baseline_acc = train_model(baseline, "ReLU", train_loader, test_loader, args.epochs, args.lr)
+    baseline_acc, baseline_time = train_model(
+        baseline, "ReLU", train_loader, test_loader, args.epochs, args.lr
+    )
+    results["ReLU"] = {"acc": baseline_acc, "params": baseline_params, "time": baseline_time}
 
-    # --- Tropical Neural Network ---
-    print("\n" + "-" * 40)
-    print("2. Tropical Neural Network")
-    print("-" * 40)
+    # --- 2. Hybrid Tropical NN (RECOMMENDED) ---
+    print("\n" + "-" * 70)
+    print("2. Hybrid Tropical NN (RECOMMENDED)")
+    print("   Architecture: Linear → TropicalAffine → Linear → TropicalAffine → Linear")
+    print("   TropicalAffine: y[i] = max(max_k(LayerNorm(x)[k] + W[k,i]), b[i])")
+    print("-" * 70)
 
-    tropical = TropicalNN(layer_sizes)
-    tropical_weight_init(tropical, init_scale=0.1)
+    hybrid = HybridTropicalNN(layer_sizes)
+    tropical_weight_init(hybrid, init_scale=0.5)
 
-    tropical_params = count_parameters(tropical)
-    print(f"Parameters: {tropical_params['total']:,}")
-    print(f"  Tropical: {tropical_params['tropical']:,}")
-    print(f"  Linear: {tropical_params['linear']:,}")
+    hybrid_params = count_parameters(hybrid)
+    print(f"Parameters: {hybrid_params['total']:,}")
+    print(f"  Tropical: {hybrid_params['tropical']:,}")
+    print(f"  Linear: {hybrid_params['linear']:,}")
 
     print("Training...")
-    tropical_acc = train_model(tropical, "Tropical", train_loader, test_loader, args.epochs, args.lr)
+    hybrid_acc, hybrid_time = train_model(
+        hybrid, "Hybrid", train_loader, test_loader, args.epochs, args.lr
+    )
+    results["Hybrid"] = {"acc": hybrid_acc, "params": hybrid_params['total'], "time": hybrid_time}
+
+    # --- 3. Full MMP Tropical NN ---
+    print("\n" + "-" * 70)
+    print("3. Full MMP Tropical NN")
+    print("   Architecture: Linear → MaxPlus → MinPlus → Linear → MaxPlus → MinPlus → Linear")
+    print("   MaxPlusAffine: y[i] = max(max_k(LayerNorm(x)[k] + W[k,i]), b[i])")
+    print("   MinPlusAffine: y[i] = min(min_k(LayerNorm(x)[k] + W[k,i]), b[i])")
+    print("-" * 70)
+
+    mmp = TropicalNN(layer_sizes)
+    tropical_weight_init(mmp, init_scale=0.5)
+
+    mmp_params = count_parameters(mmp)
+    print(f"Parameters: {mmp_params['total']:,}")
+    print(f"  Tropical: {mmp_params['tropical']:,}")
+    print(f"  Linear: {mmp_params['linear']:,}")
+
+    print("Training...")
+    mmp_acc, mmp_time = train_model(
+        mmp, "MMP", train_loader, test_loader, args.epochs, args.lr
+    )
+    results["MMP"] = {"acc": mmp_acc, "params": mmp_params['total'], "time": mmp_time}
 
     # --- Summary ---
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     print("SUMMARY")
-    print("=" * 60)
+    print("=" * 70)
 
-    print("\nAccuracy:")
-    print(f"  Standard ReLU:  {baseline_acc:.1f}%")
-    print(f"  Tropical NN:    {tropical_acc:.1f}%")
+    print("\n" + "-" * 50)
+    print(f"{'Model':<20} {'Accuracy':>12} {'Parameters':>14} {'Time':>10}")
+    print("-" * 50)
+    for name, r in results.items():
+        label = f"{name} *" if name == "Hybrid" else name
+        print(f"{label:<20} {r['acc']:>11.1f}% {r['params']:>14,} {r['time']:>9.1f}s")
+    print("-" * 50)
+    print("* Recommended architecture")
 
-    print("\nParameters:")
-    print(f"  Standard ReLU:  {baseline_params:,}")
-    print(f"  Tropical NN:    {tropical_params['total']:,}")
+    # Architecture comparison
+    print("\nArchitecture Comparison:")
+    print("  ReLU:   Linear(784→256) → ReLU → Linear(256→128) → ReLU → Linear(128→10)")
+    print("  Hybrid: Linear(784→256) → TropicalAffine(256) → Linear(256→128) → TropicalAffine(128) → Linear(128→10)")
+    print("  MMP:    Linear(784→256) → MaxPlus(256) → MinPlus(256) → Linear(256→128) → MaxPlus(128) → MinPlus(128) → Linear(128→10)")
 
     # Operation analysis
-    print("\nOperation Analysis (per sample):")
+    print("\nOperation Analysis (per sample, hidden layers only):")
+    print("  ReLU:   Uses multiplications in matmul + element-wise max")
+    print("  Hybrid: 2 tropical layers (256x256 + 128x128 = 81,920 additions/comparisons)")
+    print("  MMP:    4 tropical layers (2x256x256 + 2x128x128 = 163,840 additions/comparisons)")
 
-    # ReLU network: multiplications in matrix multiply
-    relu_muls = 0
-    relu_adds = 0
-    for i in range(len(layer_sizes) - 1):
-        relu_muls += layer_sizes[i] * layer_sizes[i + 1]
-        relu_adds += layer_sizes[i] * layer_sizes[i + 1] + layer_sizes[i + 1]
-
-    print(f"  ReLU Network:")
-    print(f"    Multiplications: {relu_muls:,}")
-    print(f"    Additions: {relu_adds:,}")
-
-    # Tropical network: Linear layers have muls, tropical layers only have adds/comparisons
-    # Linear: 784→256, 256→128, 128→10
-    # Tropical: MaxPlusAffine(256), MinPlusAffine(256), MaxPlusAffine(128), MinPlusAffine(128)
-    trop_muls = layer_sizes[0] * layer_sizes[1]  # First linear
-    for i in range(1, len(layer_sizes) - 1):
-        trop_muls += layer_sizes[i] * layer_sizes[i + 1]  # Hidden/output linear
-
-    # Tropical layers: n*n additions + n*n comparisons (for each MaxPlus and MinPlus)
-    trop_adds = 0
-    trop_comps = 0
-    for i in range(1, len(layer_sizes) - 1):
-        dim = layer_sizes[i]
-        # MaxPlusAffine + MinPlusAffine
-        trop_adds += 2 * dim * dim  # x[k] + W[k,j]
-        trop_comps += 2 * dim * dim  # max/min comparisons
-
-    print(f"  Tropical Network:")
-    print(f"    Multiplications: {trop_muls:,}")
-    print(f"    Additions: {trop_adds:,} (tropical layers)")
-    print(f"    Comparisons: {trop_comps:,} (max/min)")
-
-    # Note about tropical advantage
-    print("\nNote: Tropical layers use only additions and max/min operations,")
-    print("which are more efficient than multiplications on specialized hardware.")
+    print("\nKey Insights:")
+    print("  - Hybrid is simpler (half the tropical operations) and often equally effective")
+    print("  - Tropical layers use only additions and max/min (no multiplications)")
+    print("  - Both tropical variants work well, choose based on your use case")
+    print("=" * 70)
 
 
 if __name__ == "__main__":

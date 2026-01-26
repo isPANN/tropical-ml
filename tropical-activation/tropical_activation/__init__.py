@@ -5,15 +5,18 @@ Replaces traditional activation functions with tropical affine layers.
 Uses only additions and max/min operations instead of multiplications.
 
 Key components:
-- MaxPlusAffine, MinPlusAffine: Core tropical layers (square, with LayerNorm)
-- TropicalBlock: Linear → MaxPlus → MinPlus (building block)
-- TropicalNN: Full tropical neural network
+- TropicalAffine (alias for MaxPlusAffine): Recommended tropical layer
+- HybridTropicalNN: Recommended architecture (Linear → TropicalAffine)
+- TropicalNN: Full MMP architecture (Linear → MaxPlus → MinPlus)
 
-Architecture:
+Recommended Architecture (Hybrid):
+    Linear(in→out) → TropicalAffine(out) → Linear → TropicalAffine → ... → Linear
+
+Full MMP Architecture:
     Linear(in→out) → MaxPlusAffine(out) → MinPlusAffine(out) → Linear → ...
 
 Mathematical foundation:
-- MaxPlusAffine: y[i] = max(max_k(LayerNorm(x)[k] + W[k,i]), b[i])
+- TropicalAffine/MaxPlusAffine: y[i] = max(max_k(LayerNorm(x)[k] + W[k,i]), b[i])
 - MinPlusAffine: y[i] = min(min_k(LayerNorm(x)[k] + W[k,i]), b[i])
 
 Reference: Luo & Fan 2021 - "Min-Max-Plus Neural Networks"
@@ -21,15 +24,15 @@ https://arxiv.org/abs/2102.06358
 
 Example:
     >>> import torch
-    >>> from tropical_activation import TropicalNN, MaxPlusAffine
+    >>> from tropical_activation import HybridTropicalNN, TropicalAffine
     >>>
-    >>> # Create a tropical classifier
-    >>> model = TropicalNN([784, 256, 128, 10])
+    >>> # Create a hybrid tropical classifier (recommended)
+    >>> model = HybridTropicalNN([784, 256, 128, 10])
     >>> x = torch.randn(32, 784)
     >>> logits = model(x)
     >>>
     >>> # Or use individual layers
-    >>> layer = MaxPlusAffine(256)  # square: 256 → 256
+    >>> layer = TropicalAffine(256)  # square: 256 → 256
     >>> output = layer(torch.randn(32, 256))
 """
 
@@ -39,6 +42,7 @@ __version__ = "0.2.0"
 from .layers import (
     MaxPlusAffine,
     MinPlusAffine,
+    TropicalAffine,  # Alias for MaxPlusAffine (recommended)
     MaxPlusLayer,  # Alias
     MinPlusLayer,  # Alias
     TropicalReLU,
@@ -49,7 +53,9 @@ from .layers import (
 
 # Building blocks
 from .blocks import (
-    TropicalBlock,
+    HybridBlock,  # Recommended: Linear → TropicalAffine
+    HybridMLP,
+    TropicalBlock,  # Full MMP: Linear → MaxPlus → MinPlus
     ResidualTropicalBlock,
     MaxPlusBlock,
     MinPlusBlock,
@@ -60,6 +66,11 @@ from .blocks import (
 
 # Complete models
 from .models import (
+    # Recommended (Hybrid architecture)
+    HybridTropicalNN,
+    HybridClassifier,
+    create_hybrid_nn,
+    # Full MMP (MaxPlus + MinPlus)
     TropicalNN,
     TropicalClassifier,
     PureTropicalNN,
@@ -124,16 +135,20 @@ from .vision import (
 __all__ = [
     # Version
     "__version__",
-    # Layers (new names)
+    # Layers
     "MaxPlusAffine",
     "MinPlusAffine",
+    "TropicalAffine",  # Recommended (alias for MaxPlusAffine)
     "MaxPlusLayer",
     "MinPlusLayer",
     "TropicalReLU",
     "TropicalLeakyReLU",
     "TROPICAL_GEMM_AVAILABLE",
     "GPU_AVAILABLE",
-    # Blocks (new names)
+    # Blocks - Hybrid (recommended)
+    "HybridBlock",
+    "HybridMLP",
+    # Blocks - Full MMP
     "TropicalBlock",
     "ResidualTropicalBlock",
     "MaxPlusBlock",
@@ -141,7 +156,11 @@ __all__ = [
     "TropicalMLP",
     "MMPBlock",
     "ResidualMMPBlock",
-    # Models (new names)
+    # Models - Hybrid (recommended)
+    "HybridTropicalNN",
+    "HybridClassifier",
+    "create_hybrid_nn",
+    # Models - Full MMP
     "TropicalNN",
     "TropicalClassifier",
     "PureTropicalNN",
