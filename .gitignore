@@ -1,5 +1,5 @@
 # Tropical-gemm (cloned from external repo)
-tropical-gemm/
+/tropical-gemm/
 
 # uv
 .venv/
@@ -80,3 +80,7 @@ Thumbs.db
 
 # Rust build artifacts (if building locally)
 target/
+
+# Documentation
+site/
+.cache/

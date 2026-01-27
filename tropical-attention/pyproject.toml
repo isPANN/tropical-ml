@@ -33,7 +33,6 @@ classifiers = [
 ]
 
 dependencies = [
-    "dm-clrs>=2.0.1",
     "numpy>=1.20",
     "torch>=2.0",
     "tropical-gemm[torch]",
@@ -47,19 +46,26 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.0",
 ]
+docs = [
+    "mkdocs>=1.5",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.24",
+    "mkdocs-gen-files>=0.5",
+    "mkdocs-literate-nav>=0.6",
+]
 experiment = [
     "matplotlib>=3.5",
     "wandb>=0.15",
 ]
 clrs = [
-    "dm-clrs>=1.0.0",
+    "dm-clrs>=2.0.1",
     "jax>=0.4.0",
     "jaxlib>=0.4.0",
     "chex>=0.1.0",
     "optax>=0.1.0",
 ]
 all = [
-    "tropical-attention[dev,experiment,clrs]",
+    "tropical-attention[dev,docs,experiment,clrs]",
 ]
 
 [project.urls]

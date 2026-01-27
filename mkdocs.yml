@@ -1,0 +1,114 @@
+site_name: Tropical ML
+site_description: Tropical Geometry for Machine Learning - Max-Plus Algebra, Attention, and Neural Network Primitives
+site_author: Xiwei Pan
+site_url: https://isPANN.github.io/tropical-ml/
+
+repo_name: isPANN/tropical-ml
+repo_url: https://github.com/isPANN/tropical-ml
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: teal
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: teal
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.indexes
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths:
+            - tropical-attention
+            - tropical-gemm
+            - tropical-activation
+            - tropical-pruning
+          options:
+            show_source: true
+            show_root_heading: true
+            show_root_full_path: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            docstring_style: google
+            docstring_section_style: spacy
+            merge_init_into_class: true
+            show_signature_annotations: true
+            separate_signature: true
+            signature_crossrefs: true
+            members_order: source
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.tabbed:
+      alternate_style: true
+  - admonition
+  - pymdownx.details
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Installation: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+  - Packages:
+      - packages/index.md
+      - Tropical Attention:
+          - Overview: packages/tropical-attention/index.md
+          - API Reference:
+              - TropicalMultiheadAttention: packages/tropical-attention/api/attention.md
+              - TropicalLinear: packages/tropical-attention/api/tropical_linear.md
+              - Tropicalize: packages/tropical-attention/api/tropicalize.md
+              - hilbert_distance: packages/tropical-attention/api/hilbert.md
+              - TropicalTransformerEncoderLayer: packages/tropical-attention/api/transformer.md
+      - Tropical GEMM:
+          - Overview: packages/tropical-gemm/index.md
+          - API Reference: packages/tropical-gemm/api.md
+      - Tropical Activation:
+          - Overview: packages/tropical-activation/index.md
+      - Tropical Pruning:
+          - Overview: packages/tropical-pruning/index.md
+  - Theory:
+      - Tropical Geometry: theory/tropical-geometry.md
+      - Hilbert Metric: theory/hilbert-metric.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/isPANN/tropical-ml
