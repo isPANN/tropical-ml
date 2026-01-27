@@ -68,9 +68,8 @@ class TropicalLinear(nn.Module):
         y = y_2d.reshape(*orig_shape, -1)
 
         if self.bias is not None:
-            # Tropical addition is max, but for bias we use standard addition
-            # to maintain compatibility with gradient flow
-            y = y + self.bias
+            # Tropical addition is max
+            y = torch.maximum(y, self.bias)
 
         return y
 
