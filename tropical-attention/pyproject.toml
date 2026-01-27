@@ -33,6 +33,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "dm-clrs>=2.0.1",
     "numpy>=1.20",
     "torch>=2.0",
     "tropical-gemm[torch]",
@@ -50,8 +51,15 @@ experiment = [
     "matplotlib>=3.5",
     "wandb>=0.15",
 ]
+clrs = [
+    "dm-clrs>=1.0.0",
+    "jax>=0.4.0",
+    "jaxlib>=0.4.0",
+    "chex>=0.1.0",
+    "optax>=0.1.0",
+]
 all = [
-    "tropical-attention[dev,experiment]",
+    "tropical-attention[dev,experiment,clrs]",
 ]
 
 [project.urls]
@@ -59,8 +67,11 @@ Homepage = "https://github.com/isPANN/tropical-ml"
 Documentation = "https://github.com/isPANN/tropical-ml#readme"
 Repository = "https://github.com/isPANN/tropical-ml"
 
+[project.scripts]
+tropical-clrs = "benchmarks.clrs.train:main"
+
 [tool.hatch.build.targets.wheel]
-packages = ["tropical_attention"]
+packages = ["tropical_attention", "benchmarks"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -81,3 +92,8 @@ python_version = "3.9"
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+]
