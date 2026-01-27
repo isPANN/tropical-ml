@@ -1,0 +1,83 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tropical-attention"
+version = "0.1.0"
+description = "Multi-Head Tropical Attention: Attention mechanism using tropical geometry and Hilbert projective metric"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    { name = "Xiwei Pan" }
+]
+keywords = [
+    "tropical-algebra",
+    "attention",
+    "transformer",
+    "neural-networks",
+    "deep-learning",
+    "hilbert-metric",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "numpy>=1.20",
+    "torch>=2.0",
+    "tropical-gemm[torch]",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=23.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+]
+experiment = [
+    "matplotlib>=3.5",
+    "wandb>=0.15",
+]
+all = [
+    "tropical-attention[dev,experiment]",
+]
+
+[project.urls]
+Homepage = "https://github.com/isPANN/tropical-ml"
+Documentation = "https://github.com/isPANN/tropical-ml#readme"
+Repository = "https://github.com/isPANN/tropical-ml"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tropical_attention"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
+
+[tool.black]
+line-length = 88
+target-version = ["py39", "py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
