@@ -134,14 +134,16 @@ class TropicalProcessor(nn.Module):
             msg_input = torch.cat([z_i, z_j, e], dim=-1)  # (B, N, N, 3H)
             messages = self.edge_transforms[i](msg_input)  # (B, N, N, H)
 
-            # Aggregate messages using tropical attention
-            # Use messages as values, weighted by adjacency
-            messages_flat = messages.view(batch_size, num_nodes, -1)  # (B, N, N*H)
+            # Aggregate messages using max (tropical-style)
+            # Apply adjacency mask: only aggregate from neighbors
+            masked_messages = messages * adj_mat.unsqueeze(-1)  # (B, N, N, H)
 
-            # Self-attention with tropical geometry
-            # Note: TropicalMultiheadAttention handles masking internally
+            # Max aggregation over neighbors (tropical aggregation)
+            aggregated = masked_messages.max(dim=2)[0]  # (B, N, H)
+
+            # Tropical attention on aggregated messages
             z_attn, _ = self.attention_layers[i](
-                z, z, z,
+                z, z, aggregated,  # Query=z, Key=z, Value=aggregated messages
             )
 
             # Residual + LayerNorm

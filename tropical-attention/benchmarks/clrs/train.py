@@ -90,14 +90,14 @@ class CLRSDataset(Dataset):
             seed=42 if split == "train" else 123,
         )
 
-    def __len__(self):
-        return self.num_samples
+        # Pre-generate all samples for consistency
+        self._cache = []
+        for _ in range(self.num_samples):
+            feedback = self.sampler.next(batch_size=1)
+            self._cache.append(self._convert_feedback(feedback))
 
-    def __getitem__(self, idx):
-        # Sample a new problem instance
-        feedback = self.sampler.next(batch_size=1)
-
-        # Convert JAX arrays to PyTorch tensors
+    def _convert_feedback(self, feedback):
+        """Convert CLRS feedback to PyTorch tensors."""
         inputs = {}
         outputs = {}
         hints = {}
@@ -126,6 +126,12 @@ class CLRSDataset(Dataset):
             "hints": hints,
             "lengths": int(feedback.features.lengths[0]),
         }
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        return self._cache[idx]
 
 
 def collate_fn(batch):
