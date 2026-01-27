@@ -30,18 +30,18 @@ Tropicalize (log + normalize)
     ├──► Q = TropicalLinear(X)
     ├──► K = TropicalLinear(X)
     └──► V = TropicalLinear(X)
-           │
-           ▼
-    Scores = -hilbert_distance(Q, K)
-           │
-           ▼
-    C = tropical_matmul(Scores, V)
-           │
-           ▼
-    Detropicalize (exp)
-           │
-           ▼
-    Output = Linear(C)
+    │
+    ▼
+Scores = -hilbert_distance(Q, K)
+    │
+    ▼
+C = tropical_matmul(Scores, V)
+    │
+    ▼
+Detropicalize (exp)
+    │
+    ▼
+Output = Linear(C)
 ```
 
 ## Quick Example
