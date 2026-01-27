@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Multi-Head Tropical Attention: Attention mechanism using tropical geometry and Hilbert projective metric"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.9,<3.13"
+requires-python = ">=3.9"
 authors = [
     { name = "Xiwei Pan" }
 ]

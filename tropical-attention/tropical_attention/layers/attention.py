@@ -14,18 +14,11 @@ from .tropicalize import Tropicalize, Detropicalize
 from .hilbert import hilbert_distance
 from .tropical_linear import TropicalLinear
 
-# Import tropical-gemm backend
-try:
-    from tropical_gemm.pytorch import (
-        tropical_maxplus_matmul,
-        tropical_maxplus_matmul_gpu,
-        GPU_AVAILABLE,
-    )
-
-    TROPICAL_GEMM_AVAILABLE = True
-except ImportError:
-    TROPICAL_GEMM_AVAILABLE = False
-    GPU_AVAILABLE = False
+from tropical_gemm.pytorch import (
+    tropical_maxplus_matmul,
+    tropical_maxplus_matmul_gpu,
+    GPU_AVAILABLE,
+)
 
 
 class TropicalMultiheadAttention(nn.Module):

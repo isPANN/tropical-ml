@@ -9,18 +9,11 @@ import math
 import torch
 import torch.nn as nn
 
-# Import tropical-gemm backend
-try:
-    from tropical_gemm.pytorch import (
-        tropical_maxplus_matmul,
-        tropical_maxplus_matmul_gpu,
-        GPU_AVAILABLE,
-    )
-
-    TROPICAL_GEMM_AVAILABLE = True
-except ImportError:
-    TROPICAL_GEMM_AVAILABLE = False
-    GPU_AVAILABLE = False
+from tropical_gemm.pytorch import (
+    tropical_maxplus_matmul,
+    tropical_maxplus_matmul_gpu,
+    GPU_AVAILABLE,
+)
 
 
 class TropicalLinear(nn.Module):
@@ -85,4 +78,4 @@ class TropicalLinear(nn.Module):
         return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}"
 
 
-__all__ = ["TropicalLinear", "TROPICAL_GEMM_AVAILABLE", "GPU_AVAILABLE"]
+__all__ = ["TropicalLinear", "GPU_AVAILABLE"]
